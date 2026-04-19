@@ -21,6 +21,51 @@ from astroquery.mast import Observations
 logger = logging.getLogger(__name__)
 
 
+_AUTHENTICATED = False
+
+
+def load_mast_token() -> Optional[str]:
+    """Return the MAST API token from the environment or the standard file.
+
+    Precedence:
+      1. `MAST_API_TOKEN` environment variable
+      2. `~/.mast_token` (single-line file, owner-readable only)
+
+    Returns None if no token is configured — the pipeline then proceeds with
+    public-data access only.
+    """
+    env = os.environ.get("MAST_API_TOKEN")
+    if env:
+        return env.strip() or None
+    path = Path.home() / ".mast_token"
+    if path.exists():
+        tok = path.read_text().strip()
+        return tok or None
+    return None
+
+
+def ensure_mast_login() -> bool:
+    """Authenticate to MAST once per process if a token is available.
+
+    Returns True if authenticated, False if running anonymously. Safe to call
+    repeatedly — subsequent calls are no-ops.
+    """
+    global _AUTHENTICATED
+    if _AUTHENTICATED:
+        return True
+    token = load_mast_token()
+    if token is None:
+        return False
+    try:
+        Observations.login(token=token)
+        _AUTHENTICATED = True
+        logger.info("Authenticated to MAST with API token")
+        return True
+    except Exception as e:
+        logger.warning(f"MAST login failed ({e}); continuing with public data only")
+        return False
+
+
 def list_program_products(
     program_id: str,
     target_name: Optional[str] = None,
@@ -46,6 +91,7 @@ def list_program_products(
         One entry per product with keys: obs_id, productFilename, size, dataURI,
         productType, instrument_name, target_name.
     """
+    ensure_mast_login()
     prop_id = program_id.upper().removeprefix("GO-").removeprefix("DD-").removeprefix("GTO-").strip()
 
     criteria = {"obs_collection": "JWST", "proposal_id": prop_id}
@@ -126,6 +172,8 @@ def fetch(
     list[Path]
         Absolute paths to symlinks in `data/uncal/` for every fetched file.
     """
+    ensure_mast_login()
+
     project_dir = Path(project_dir).resolve()
     uncal_dir = project_dir / "data" / "uncal"
     mast_cache = project_dir / "data" / "MAST_Download"

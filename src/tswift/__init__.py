@@ -11,7 +11,7 @@ from tswift.contracts import (
     FileRef,
 )
 from tswift.bootstrap import bootstrap
-from tswift.mast import fetch, list_program_products
+from tswift.mast import fetch, list_program_products, ensure_mast_login, load_mast_token
 from tswift.bad_pixel import mad_clip
 from tswift.extract import (
     find_trace,
@@ -46,6 +46,8 @@ __all__ = [
     "bootstrap",
     "fetch",
     "list_program_products",
+    "ensure_mast_login",
+    "load_mast_token",
     "mad_clip",
     "find_trace",
     "extract_trace_2d",
