@@ -27,6 +27,7 @@ from tswift import (
     compute_ld_per_wavelength,
     fit_spec_curves,
     combine_spectrum,
+    save_spectrum,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -137,6 +138,11 @@ def main():
         log.info(f"  {name}: {len(b['wvl_um'])} bins, "
                  f"mean depth {np.mean(b['depth_ppm']):.0f} ± {np.mean(b['depth_err_ppm']):.0f} ppm, "
                  f"wvl {b['wvl_um'][0]:.3f}–{b['wvl_um'][-1]:.3f} µm")
+
+    log.info("STEP 5/5: save spectrum (txt files + figure)")
+    paths = save_spectrum(combined, V2 / "spectrum", planet_name="WASP-69 b")
+    for k, p in paths.items():
+        log.info(f"  {k}: {p}")
 
 
 if __name__ == "__main__":

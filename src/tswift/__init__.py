@@ -29,6 +29,7 @@ from tswift.combine import (
     combine_spectrum,
     combine_detectors,
 )
+from tswift.spectrum import plot_spectrum, save_spectrum
 
 __version__ = "2.0.0.dev0"
 
@@ -59,5 +60,7 @@ __all__ = [
     "bin_inverse_variance",
     "combine_spectrum",
     "combine_detectors",
+    "plot_spectrum",
+    "save_spectrum",
     "__version__",
 ]

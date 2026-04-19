@@ -23,10 +23,26 @@ project-level `CLAUDE.md` for environment setup.
 
 ## Quickstart
 
+**For an agent or new user**: read [RUNBOOK.md](RUNBOOK.md) start to finish. It walks
+through every pipeline stage with the exact Python call, sanity checks, and the
+common failure modes to watch for.
+
 ```python
 from tswift import bootstrap, fetch
 
 project = bootstrap("WASP-69 b", program="5924", outdir="./WASP-69b_v2")
-fetch(project)
-# ... then calibration / extraction / fit (coming soon)
+fetch(project, program_id="5924", target_name="WASP-69", instrument="NIRISS")
+# ... then calibration (port pending) → mad_clip → run_extract → fit_wl_mcmc →
+#     fit_spec_curves → combine_spectrum → save_spectrum
+# See RUNBOOK.md for the full step-by-step.
+```
+
+## Regression tests
+
+```bash
+# t0 cache design (unit test, < 1 s)
+python tswift/tests/test_t0_cache.py
+
+# Full WASP-69 b pipeline from ramp to spectrum (~2.5 min)
+python tswift/scripts/test_end_to_end_wasp69b.py
 ```
