@@ -69,6 +69,26 @@ calibration data.
 Every stage's outputs should be inspected before moving on. The pipeline takes
 a couple minutes per target; reruns are cheap.
 
+### Diagnostic figures — where they live and what to look for
+
+Every compute function has a paired `plot_*` function that writes a review PNG.
+**Always call the plot function after the compute step** (run.py in the target
+dir does this automatically for the bridge workflow). A summary:
+
+| Stage | Plot function | Output PNG | What to look for |
+|-------|---------------|------------|------------------|
+| bad_pixel | `plot_bad_pixel()` | `bad_pixel.png` | Flag rate heatmap should NOT show wavelength banding (that = chromatic bias). σ-vs-signal should trend with √signal. |
+| extract/trace | `plot_trace()` | `trace.png` | Trace line sits at spatial PSF peak. Aperture dashes comfortably contain PSF wings. |
+| extract/aperture | `plot_aperture_scan()` | `aperture.png` | OOT-scatter-vs-width has a clear minimum (bowl). Spatial profile with aperture shaded covers the core. White-light curve shows baseline flat + transit dip. |
+| extract/clean | `plot_clean()` | `clean.png` | Before/after curves overlap (cleaner just picks off outliers, doesn't smooth real signal). |
+| WL MCMC | `plot_wl_fit()` | `corner.png`, `best_fit.png`, `chain.png` | Every posterior is a Gaussian blob (no rails, no flats). Best-fit residuals are white noise. Chain traces stationary after burn-in. |
+| spec_fit | `plot_spec_fit()` | `spec_fit.png` | Rp(λ) has no isolated 10σ outliers. Residual RMS is at the photon floor. LD coefs smooth in λ (no huge jumps at grid edges). |
+| combine | `save_spectrum()` | `spectrum.png` | Binned points sit on native scatter; no detector-boundary offset; y-axis is physical. |
+
+Figures go to `<product_dir>/figure/<plot>.png` or `<outdir>/spectrum.png` for
+the final combine. **If any figure shows an anomaly, fix the knob for THAT
+stage and rerun downstream — don't move on.**
+
 ---
 
 ## 2. Bootstrap — create the project dir

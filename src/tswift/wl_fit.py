@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+from pathlib import Path
 from typing import Optional
 
 import emcee
@@ -162,3 +163,116 @@ def fit_wl_mcmc(
         "best_fit_curve": best_fit,
         "residuals": residuals,
     }
+
+
+# ----------------------------------------------------------------------------
+# Diagnostic plots
+# ----------------------------------------------------------------------------
+
+def plot_wl_fit(
+    result: dict,
+    time_data_hr: np.ndarray,
+    flux_data: np.ndarray,
+    outdir: str | Path,
+    *,
+    detector: str | None = None,
+    priors: dict | None = None,
+) -> dict:
+    """Write 3 diagnostic PNGs: corner, best-fit + residuals, chain traces.
+
+    Read the plots
+    --------------
+    - `corner.png`: marginal posteriors + pairwise. Every parameter should show
+      a Gaussian blob. **Flat or railed posteriors = the prior is wrong or the
+      data don't constrain the parameter.** In particular: `t0_offset` must have
+      structure — if it's flat, run `pytest tswift/tests/test_t0_cache.py`
+      before anything else.
+    - `best_fit.png`: data (gray), binned data (blue), best-fit model (red),
+      residuals below. Residual RMS in the title is the metric; look for
+      systematic sinusoidal residuals (limb-darkening mismatch) or bumps at
+      ingress/egress (orbital geometry off).
+    - `chain.png`: time series of each walker's parameter value through steps.
+      After burn-in walkers should be stationary around the median. Divergent
+      lines = insufficient burn-in or multimodal posterior.
+
+    Returns map of plot name → absolute path.
+    """
+    import matplotlib.pyplot as plt
+    import corner
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+
+    labels = result["param_order"]
+    samples = result["samples"]
+    chain = result["chain"]
+    ndim = result["ndim"]
+    best = result["best_params"]
+    det_tag = f" — {detector}" if detector else ""
+
+    paths: dict[str, Path] = {}
+
+    # --- corner ---
+    ranges = None
+    if priors is not None:
+        try:
+            ranges = [tuple(priors[p]) for p in labels]
+        except KeyError:
+            ranges = None
+    fig = corner.corner(
+        samples, labels=labels, truths=best,
+        range=ranges, show_titles=True, title_fmt=".4f",
+    )
+    fig.suptitle(f"WL MCMC posteriors{det_tag}", y=1.02)
+    p_corner = outdir / "corner.png"
+    fig.savefig(p_corner, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    paths["corner"] = p_corner.resolve()
+
+    # --- best fit + residuals ---
+    best_curve = result["best_fit_curve"]
+    resid = result["residuals"]
+    rms = result["rms_residual"]
+    fig, axes = plt.subplots(2, 1, figsize=(12, 7),
+                             gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+    axes[0].scatter(time_data_hr, flux_data, s=3, alpha=0.4, color="gray", label="data")
+    # binned data
+    bin_w = max(1, len(time_data_hr) // 100)
+    n_bins = len(time_data_hr) // bin_w
+    tb = time_data_hr[: n_bins * bin_w].reshape(-1, bin_w).mean(axis=1)
+    fb = flux_data[: n_bins * bin_w].reshape(-1, bin_w).mean(axis=1)
+    axes[0].scatter(tb, fb, s=20, color="tab:blue", zorder=5, label=f"binned (×{bin_w})")
+    axes[0].plot(time_data_hr, best_curve, "r-", lw=1.5, label="best-fit", zorder=10)
+    axes[0].set_ylabel("normalized flux")
+    axes[0].legend()
+    axes[0].set_title(f"WL best-fit{det_tag}   "
+                      f"rp={best[labels.index('rp')]:.4f}   "
+                      f"RMS={rms * 1e6:.0f} ppm")
+
+    axes[1].scatter(time_data_hr, resid * 1e6, s=3, alpha=0.4, color="gray")
+    rb = resid[: n_bins * bin_w].reshape(-1, bin_w).mean(axis=1)
+    axes[1].scatter(tb, rb * 1e6, s=20, color="tab:blue", zorder=5)
+    axes[1].axhline(0, color="r", ls="--")
+    axes[1].set_xlabel("time (hours)")
+    axes[1].set_ylabel("residuals (ppm)")
+    plt.tight_layout()
+    p_fit = outdir / "best_fit.png"
+    fig.savefig(p_fit, dpi=120)
+    plt.close(fig)
+    paths["best_fit"] = p_fit.resolve()
+
+    # --- chain traces ---
+    fig, axes = plt.subplots(ndim, 1, figsize=(10, 1.6 * ndim), sharex=True)
+    if ndim == 1:
+        axes = [axes]
+    for i, ax in enumerate(axes):
+        ax.plot(chain[:, :, i], alpha=0.3, color="0.3", lw=0.5)
+        ax.set_ylabel(labels[i])
+    axes[-1].set_xlabel("step")
+    axes[0].set_title(f"WL chain traces{det_tag}   "
+                      f"acceptance {result['acceptance'].mean():.2f}")
+    plt.tight_layout()
+    p_chain = outdir / "chain.png"
+    fig.savefig(p_chain, dpi=120)
+    plt.close(fig)
+    paths["chain"] = p_chain.resolve()
+
+    return paths

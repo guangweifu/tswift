@@ -417,3 +417,190 @@ def save_extract_outputs(result: dict, out_dir: Path) -> None:
     np.save(out_dir / "extract_2D.npy", result["extract_2D"])
     np.save(out_dir / "clean_2D.npy", result["clean_2D"])
     np.save(out_dir / "oot_mask.npy", result["oot_mask"])
+
+
+# ----------------------------------------------------------------------------
+# Diagnostic plots
+# ----------------------------------------------------------------------------
+
+def plot_trace(
+    data_all: np.ndarray,
+    trace_fit: np.ndarray,
+    half_width: int,
+    outdir: str | Path,
+    *,
+    detector: str | None = None,
+) -> Path:
+    """Trace overlay + aperture dashes + spatial profile.
+
+    Read the plot
+    -------------
+    - Left: median frame with red trace line and dashed ±half_width aperture.
+      Watch for trace sitting high or low relative to the PSF — that means
+      trace_half_width is too narrow or trace_poly_order is off.
+    - Right: collapsed spatial profile. The PSF should be centered within the
+      aperture and decay to < 10 % of peak at the edges. If the profile is
+      asymmetric or clipped at an edge, widen `trace_half_width`.
+    """
+    import matplotlib.pyplot as plt
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+    median = np.nanmedian(data_all, axis=0)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5),
+                             gridspec_kw={"width_ratios": [3, 1]})
+    fig.suptitle(f"extract/trace — {detector or ''}   "
+                 f"row range {np.nanmin(trace_fit):.1f}–{np.nanmax(trace_fit):.1f},   "
+                 f"half_width={half_width}")
+
+    vmin = float(np.nanpercentile(median, 5))
+    vmax = float(np.nanpercentile(median, 98))
+    x = np.arange(len(trace_fit))
+    ax = axes[0]
+    ax.imshow(median, aspect="auto", origin="lower", vmin=vmin, vmax=vmax)
+    ax.plot(x, trace_fit, "r-", lw=1, label="trace center")
+    ax.plot(x, trace_fit - half_width, "r--", lw=0.5)
+    ax.plot(x, trace_fit + half_width, "r--", lw=0.5)
+    ax.set_xlabel("column"); ax.set_ylabel("row"); ax.legend(loc="upper right")
+
+    # Collapsed spatial profile around the trace
+    ap = 2 * half_width
+    n_rows = median.shape[0]
+    profile = np.full(ap, np.nan)
+    for j in range(median.shape[1]):
+        lo = int(np.round(trace_fit[j] - half_width))
+        hi = lo + ap
+        src_lo, src_hi = max(0, lo), min(n_rows, hi)
+        dst_lo = src_lo - lo
+        col = median[src_lo:src_hi, j]
+        if col.size:
+            np.nansum([profile[dst_lo:dst_lo + col.size], col], axis=0, out=profile[dst_lo:dst_lo + col.size])
+    profile = profile / np.nanmax(profile)
+    ax = axes[1]
+    ax.plot(profile, np.arange(ap), "b-")
+    ax.set_xlabel("norm flux")
+    ax.set_ylabel("row within ±half_width")
+    ax.axhline(half_width, color="r", ls="--", lw=0.5)
+    ax.set_title("Spatial profile")
+
+    plt.tight_layout()
+    png = outdir / "trace.png"
+    fig.savefig(png, dpi=120)
+    plt.close(fig)
+    return png
+
+
+def plot_aperture_scan(
+    extract_2D: np.ndarray,
+    all_results: list,
+    best_up: int,
+    best_down: int,
+    oot_mask: np.ndarray,
+    ingress_idx: int,
+    time_hr: np.ndarray,
+    wavelength_left: int,
+    wavelength_right: int,
+    outdir: str | Path,
+    *,
+    detector: str | None = None,
+) -> Path:
+    """Aperture scan + spatial profile + white-light curve with OOT baseline.
+
+    Read the plot
+    -------------
+    - Left: OOT scatter vs aperture width (every tried (up, down) pair). The
+      selected aperture is the minimum. A broad flat bowl is healthy; a sharp
+      V-shape at the edge means the optimizer couldn't find a plateau — likely
+      an extraction contamination problem.
+    - Middle: collapsed spatial PSF with the selected aperture shaded. The
+      aperture should cover the bright core and trail into the wings symmetrically.
+    - Right: white-light curve (normalized) using the best aperture, with the
+      detected OOT baseline in red and the ingress frame marked. If baseline
+      looks wrong, `build_pretransit_oot_mask` heuristic misfired — check time
+      ordering and segment stitching.
+    """
+    import matplotlib.pyplot as plt
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+
+    widths = np.array([r[1] - r[0] for r in all_results])
+    scats = np.array([r[2] for r in all_results])
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(f"extract/aperture — {detector or ''}   "
+                 f"best rows [{best_up}:{best_down}], width {best_down - best_up}")
+
+    axes[0].scatter(widths, scats, s=5, alpha=0.4)
+    axes[0].axvline(best_down - best_up, color="r", ls="--", label=f"best width={best_down - best_up}")
+    axes[0].set_xlabel("aperture width (rows)")
+    axes[0].set_ylabel("OOT scatter (criterion metric)")
+    axes[0].set_title("Aperture scan")
+    axes[0].legend()
+
+    median_trace = np.nanmedian(extract_2D, axis=0)
+    spatial = np.nansum(median_trace, axis=1)
+    spatial = spatial / np.nanmax(spatial)
+    axes[1].plot(spatial, "b-")
+    axes[1].axvspan(best_up, best_down, color="red", alpha=0.2, label=f"aperture [{best_up}:{best_down}]")
+    axes[1].set_xlabel("row within extracted cube")
+    axes[1].set_ylabel("norm flux")
+    axes[1].set_title("Spatial profile + selected aperture")
+    axes[1].legend()
+
+    cl = np.nansum(extract_2D[:, best_up:best_down, wavelength_left:wavelength_right], axis=(1, 2))
+    baseline = np.nanmedian(cl[oot_mask]) if oot_mask.any() else np.nanmedian(cl)
+    wl_nor = cl / baseline
+    axes[2].scatter(time_hr[~oot_mask], wl_nor[~oot_mask], s=2, color="0.6", alpha=0.6, label="transit/post")
+    axes[2].scatter(time_hr[oot_mask], wl_nor[oot_mask], s=4, color="red", alpha=0.9, label=f"OOT baseline ({int(oot_mask.sum())} frames)")
+    if 0 < ingress_idx < len(time_hr):
+        axes[2].axvline(time_hr[ingress_idx], color="blue", ls="--", lw=1, label=f"ingress (frame {ingress_idx})")
+    axes[2].set_xlabel("time (hours)")
+    axes[2].set_ylabel("norm flux")
+    axes[2].set_title("White-light curve (best aperture)")
+    axes[2].legend(markerscale=3, fontsize=9)
+
+    plt.tight_layout()
+    png = outdir / "aperture.png"
+    fig.savefig(png, dpi=120)
+    plt.close(fig)
+    return png
+
+
+def plot_clean(
+    cl_2D_before: np.ndarray,
+    cl_2D_after: np.ndarray,
+    time_hr: np.ndarray,
+    wavelength_left: int,
+    wavelength_right: int,
+    outdir: str | Path,
+    *,
+    detector: str | None = None,
+) -> Path:
+    """White-light curve before and after per-channel rolling-median clean.
+
+    Read the plot
+    -------------
+    - Both curves should overlap closely. If `after` looks significantly smoother
+      than `before` (not just individual spikes gone), your outlier_threshold is
+      too aggressive and you're smoothing real transit data. Raise `threshold`
+      or widen `window` so the rolling median is more permissive.
+    """
+    import matplotlib.pyplot as plt
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+
+    before = np.nansum(cl_2D_before[:, wavelength_left:wavelength_right], axis=1)
+    after = np.nansum(cl_2D_after[:, wavelength_left:wavelength_right], axis=1)
+    med = np.nanmedian(before)
+    before = before / med
+    after = after / med
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(time_hr, before, ".", ms=2, alpha=0.4, color="0.6", label="before clean")
+    ax.plot(time_hr, after, ".", ms=2, alpha=0.7, color="tab:red", label="after clean")
+    ax.set_xlabel("time (hours)")
+    ax.set_ylabel("normalized white-light flux")
+    ax.set_title(f"extract/clean — {detector or ''}   if after << before = outlier_threshold too tight")
+    ax.legend()
+    plt.tight_layout()
+    png = outdir / "clean.png"
+    fig.savefig(png, dpi=120)
+    plt.close(fig)
+    return png

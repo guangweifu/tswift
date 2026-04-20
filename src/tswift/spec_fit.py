@@ -209,3 +209,75 @@ def fit_spec_curves(
         "wavelength_left": wavelength_left,
         "wavelength_right": right,
     }
+
+
+# ----------------------------------------------------------------------------
+# Diagnostic plots
+# ----------------------------------------------------------------------------
+
+def plot_spec_fit(
+    sr: dict,
+    wvl: np.ndarray,
+    u1_arr: np.ndarray,
+    u2_arr: np.ndarray,
+    outdir,
+    *,
+    detector: str | None = None,
+    fix_ld2: bool = False,
+):
+    """Per-wavelength Rp/Rs, residual RMS, and LD coefficients.
+
+    Read the plot
+    -------------
+    - Top: Rp/Rs(λ) with errorbars. Look for chromatic bumps > 3σ vs neighbors
+      (candidate atmospheric feature OR systematic). Sharp inversion between
+      adjacent channels is almost always a fit-quality issue, not real.
+    - Middle: residual RMS(λ). Baseline at the photon-noise floor is expected;
+      spikes indicate channels where curve_fit struggled — those usually show
+      up as outliers in Rp/Rs. Their wavelengths are good candidates for
+      `combine.bad_wavelengths`.
+    - Bottom: LD1 and LD2 from exotic_ld. Look for discontinuities / nearest-
+      neighbor fill zones; if many channels were filled, the stagger grid is
+      incomplete for this star — try `ld_model="phoenix"`.
+    """
+    import matplotlib.pyplot as plt
+    from pathlib import Path as _P
+    outdir = _P(outdir); outdir.mkdir(parents=True, exist_ok=True)
+
+    left = sr["wavelength_left"]
+    right = sr["wavelength_right"]
+    w = wvl[left:right]
+    rp = sr["fit"][left:right, 1]
+    rp_err = sr["fit_err"][left:right, 1]
+    rms = sr["residuals_rms"][left:right]
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    fig.suptitle(f"spec_fit diagnostic — {detector or ''}   "
+                 f"(fix_ld2={fix_ld2})   n_channels={len(w)}")
+
+    ax = axes[0]
+    ax.errorbar(w, rp, yerr=rp_err, fmt=".", ms=2, alpha=0.6, color="tab:blue", ecolor="0.7", elinewidth=0.3)
+    ax.set_ylabel("Rp/Rs")
+    ax.set_title("Rp/Rs per wavelength")
+    ax.grid(alpha=0.2)
+
+    ax = axes[1]
+    ax.plot(w, rms * 1e6, ".", ms=2, alpha=0.6, color="tab:red")
+    ax.set_ylabel("residual RMS (ppm)")
+    ax.set_title("Fit residual scatter (photon-noise floor + any channel failures)")
+    ax.grid(alpha=0.2)
+
+    ax = axes[2]
+    ax.plot(w, u1_arr[left:right], "-", lw=1, color="tab:blue", label="u1 (LD1)")
+    ax.plot(w, u2_arr[left:right], "-", lw=1, color="tab:green", label="u2 (LD2)")
+    ax.set_xlabel("wavelength (µm)")
+    ax.set_ylabel("LD coeff")
+    ax.set_title("Limb-darkening coefficients (nearest-neighbor fill at grid edges)")
+    ax.legend()
+    ax.grid(alpha=0.2)
+
+    plt.tight_layout()
+    png = outdir / "spec_fit.png"
+    fig.savefig(png, dpi=120)
+    plt.close(fig)
+    return png
