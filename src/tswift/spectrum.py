@@ -69,6 +69,20 @@ def plot_spectrum(
         ax.set_title(title)
     ax.legend(loc="best", fontsize=9)
     ax.grid(True, alpha=0.2)
+
+    # Auto y-range from the binned spectra (robust to native outliers — failed fits
+    # near detector edges can throw individual channels to ±1e6 ppm). Fall back to
+    # native if no binned data are available.
+    binned_depths, binned_errs = [], []
+    for b in combined.get("binned", {}).values():
+        binned_depths.extend(b["depth_ppm"])
+        binned_errs.extend(b["depth_err_ppm"])
+    if binned_depths:
+        d = np.asarray(binned_depths)
+        e = np.asarray(binned_errs)
+        lo = float(np.percentile(d, 1) - 5 * np.median(e))
+        hi = float(np.percentile(d, 99) + 5 * np.median(e))
+        ax.set_ylim(lo, hi)
     return fig, ax
 
 
