@@ -38,12 +38,22 @@ def compute_ld_per_wavelength(
     ld_model: str,
     ld_mode: str,
     ld_data_path: str,
+    mu_min: float = 0.1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute quadratic LD coeffs (u1, u2) per wavelength with NN fill at grid edges.
 
     Returns two arrays of length `len(wvl)`. Entries outside [left, right) are untouched
     (still NaN); entries where exotic_ld raised are filled with the nearest successful
     neighbor's values.
+
+    Parameters
+    ----------
+    mu_min
+        Lower bound on mu in the fit of the intensity profile.  exotic_ld's default
+        is 0.1 (include profile down to the stellar limb); raising (e.g. 0.2)
+        excludes the near-limb region where stellar atmosphere grids are least
+        reliable and can change the resulting (u1, u2) enough to shift transit
+        depths by tens to hundreds of ppm.
     """
     # Local import keeps import-time cost low for users who don't fit spectra.
     from exotic_ld import StellarLimbDarkening
@@ -59,7 +69,7 @@ def compute_ld_per_wavelength(
     for i in range(wavelength_left, wavelength_right):
         wvl_range_aa = np.array([wvl[i] - half, wvl[i] + half]) * 10_000.0
         try:
-            u1[i], u2[i] = sld.compute_quadratic_ld_coeffs(wvl_range_aa, ld_mode)
+            u1[i], u2[i] = sld.compute_quadratic_ld_coeffs(wvl_range_aa, ld_mode, mu_min=mu_min)
         except Exception:
             pass
 
