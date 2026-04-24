@@ -39,8 +39,8 @@ calibration data.
                   └────────┬─────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  calibrate (stage1 → bg → rampfit →  │  NOT YET PORTED IN v2.
-        │   stage2_wvl)                         │  Use Tswift_legacy or skip (start from existing ramp).
+        │  calibrate (stage1 → bg → rampfit →  │  NOT YET WRAPPED in v2.
+        │   stage2_wvl)                         │  Call `jwst` directly, then v2 starts at §5.
         └────────┬─────────────────────────────┘
                  ▼
         ┌──────────────────┐
@@ -159,24 +159,36 @@ links = fetch(project, program_id="5924", target_name="WASP-69", instrument="NIR
 
 ---
 
-## 4. Calibration (NOT YET PORTED to v2)
+## 4. Calibration (NOT YET WRAPPED in v2)
 
-**Status:** Stage1 / group_bg / rampfit / stage2_wvl are still in `Tswift_legacy/`.
+**Status:** Stage 1 / group-level bg subtract / ramp fit / Stage 2 wavelength
+assignment are not yet wrapped in the tswift API. Call the `jwst` package
+directly to produce ramp products, then v2 starts at §5.
 
-If you're reducing a new observation from uncal files, run the legacy calibration
-first, then join v2 at stage 5. The legacy calibration writes these to
-`<project>/product/`:
+The analysis stages expect these files in `<project>/product/` (or
+`product_<det>/` for G395H):
 
 - `all_frame.npy` — (n_frames, n_rows, n_cols) ramp-fit output
 - `time_all.npy` — (n_frames,) BJD per integration
-- `SOSS_wvl.npy` (SOSS) or `G395H_<det>_wvl.npy` (G395H) — wavelength per column
+- `<mode>_<det>_wvl.npy` — e.g. `SOSS_nis_wvl.npy`, `G395H_nrs1_wvl.npy`,
+  `PRISM_nrs2_wvl.npy` — wavelength per column
+
+**Two gotchas worth remembering** (see CLAUDE.md "Lessons learned" for the
+full list):
+
+- **Disable `expand_large_events` in JumpStep** for BOTS time series —
+  `jump.expand_large_events=False`. Snowball flagging is serial and 20×
+  slows ramp fit. Snowballs are rare in BOTS, so it's safe.
+- **`AssignWcsStep` failing with "No open slits fall on detector …" is
+  often correct.** For PRISM BOTS S1600A1 the spectrum may land on only
+  one detector; the slit genuinely isn't on the other.
 
 **For v2 regression tests:** the WASP-69 b ramp products are already on disk.
-Skip straight to stage 5.
+Skip straight to §5.
 
-**Eventual port plan:** `tswift.calibrate(project, mode)` calling the jwst package
-under the hood. Not urgent — calibration is slow, deterministic, and covered by
-mature jwst code.
+**Eventual port plan:** `tswift.calibrate(project, mode)` wrapping the jwst
+package. Not urgent — calibration is slow, deterministic, and covered by
+mature `jwst` code.
 
 ---
 
@@ -497,9 +509,10 @@ see this via `target.source`).
 
 ---
 
-## 13. Legacy reference
+## 13. Where to find deeper context
 
-Specific question about a stage? The legacy implementation is at
-`Tswift_legacy/src/Tswift/analysis/step_<n>_*.py` — kept intact for reference
-until every step is ported + regression-tested. Do NOT import from `Tswift_legacy`
-in new code; it's a reference corpus, not a runtime dependency.
+- **Project-level agent guide (architecture, folder layout, lessons learned):**
+  [`../CLAUDE.md`](../CLAUDE.md)
+- **Per-target reduction quirks:** `<Planet>/NOTES.md` in each planet folder.
+- **Reference reductions:** `WASP-69b/` (SOSS), `HAT-P-11 b/` (G395H
+  multi-visit), `LP 890-9/{b,c}/` (PRISM multi-visit).
