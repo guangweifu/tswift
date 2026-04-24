@@ -39,8 +39,10 @@ calibration data.
                   └────────┬─────────┘
                            ▼
         ┌──────────────────────────────────────┐
-        │  calibrate (stage1 → bg → rampfit →  │  NOT YET WRAPPED in v2.
-        │   stage2_wvl)                         │  Call `jwst` directly, then v2 starts at §5.
+        │  run_calibrate()                     │  uncal → stage1 → bgsub → rampfit
+        │    (or composable:                    │  → wvl.npy + all_frame.npy + time_all.npy
+        │     calibrate_stage1, _bg_subtract,   │
+        │     _rampfit, _wvl, build_frame_time) │
         └────────┬─────────────────────────────┘
                  ▼
         ┌──────────────────┐
@@ -159,36 +161,79 @@ links = fetch(project, program_id="5924", target_name="WASP-69", instrument="NIR
 
 ---
 
-## 4. Calibration (NOT YET WRAPPED in v2)
+## 4. Calibration — uncal → ramp + wavelength
 
-**Status:** Stage 1 / group-level bg subtract / ramp fit / Stage 2 wavelength
-assignment are not yet wrapped in the tswift API. Call the `jwst` package
-directly to produce ramp products, then v2 starts at §5.
+**One-shot call:**
+```python
+from tswift import run_calibrate
+result = run_calibrate(
+    project,
+    mode="PRISM",            # "PRISM" | "G395H" | "SOSS" | "MIRI_LRS"
+    detector="nrs1",         # "nrs1"/"nrs2" | "nis" | "mirimage"
+    crds_cache="~/crds_cache/",   # optional; honors $CRDS_PATH if set
+    # bg-mask knobs (mode-dependent; only the relevant ones are used)
+    bg_mask_top_rows=4, bg_mask_bottom_rows=4,      # PRISM
+    count_threshold=250.0, exclude_bottom_rows=4,   # SOSS
+    bg_cols_left=(0, 22), bg_cols_right=(50, 72),   # MIRI LRS
+    # rampfit knobs
+    rejection_threshold=6.0,
+    expand_large_events=False,      # disable for BOTS; 20× speedup
+    maximum_cores="half",
+    make_plots=True,
+)
+# result["paths"]["product_dir"] has:
+#   all_frame.npy, time_all.npy, <mode>_<det>_wvl.npy
+# plus figure/bg_mask_<det>.png, figure/rampfit_<det>.png,
+#      figure/stage2_wavelength_solution.png
+```
 
-The analysis stages expect these files in `<project>/product/` (or
-`product_<det>/` for G395H):
+**Composable API** (for iteration / debugging):
+```python
+from tswift import (
+    calibrate_stage1,    # uncal → data/stage1/*.fits (Detector1, jump+rampfit skipped)
+    calibrate_bg_subtract, # stage1 → data/group_bg/*.fits (mode-dispatched mask)
+    calibrate_rampfit,   # group_bg → data/ramp/*.fits (JumpStep + RampFitStep)
+    calibrate_wvl,       # ramp → product*/<mode>_<det>_wvl.npy
+    build_frame_time,    # ramp → product*/all_frame.npy + time_all.npy
+)
+```
 
-- `all_frame.npy` — (n_frames, n_rows, n_cols) ramp-fit output
-- `time_all.npy` — (n_frames,) BJD per integration
-- `<mode>_<det>_wvl.npy` — e.g. `SOSS_nis_wvl.npy`, `G395H_nrs1_wvl.npy`,
-  `PRISM_nrs2_wvl.npy` — wavelength per column
+**Mode dispatch** happens inside each function. The key difference across
+modes is the **bg mask**:
 
-**Two gotchas worth remembering** (see CLAUDE.md "Lessons learned" for the
-full list):
+| Mode | Mask method | Knobs |
+|------|-------------|-------|
+| PRISM | edge rows (top + bottom N) | `bg_mask_top_rows`, `bg_mask_bottom_rows` |
+| G395H | PSF-centroid trace + polynomial fit | none (auto) |
+| SOSS | count-threshold on CDS image | `count_threshold`, `exclude_bottom_rows` |
+| MIRI LRS | per-row median over off-trace column bands | `bg_cols_left`, `bg_cols_right` |
 
-- **Disable `expand_large_events` in JumpStep** for BOTS time series —
-  `jump.expand_large_events=False`. Snowball flagging is serial and 20×
-  slows ramp fit. Snowballs are rare in BOTS, so it's safe.
+NIRSpec/NIRISS subtract a per-column bg; MIRI LRS subtracts per-row.
+
+**Sanity checks after running:**
+- [ ] `product/figure/bg_mask_<det>.png`: mask covers full trace, bg region
+      has no residual flux. For SOSS, min bg pixels/column ≥ 5.
+- [ ] `product/figure/rampfit_<det>.png`: median rate image shows clean
+      trace, per-integration flux curve has a transit-shaped dip.
+- [ ] `product/figure/stage2_wavelength_solution.png`: monotonic,
+      matches expected range for the mode.
+- [ ] `all_frame.npy.shape` = (n_frames, n_rows, n_cols), no all-NaN frames.
+
+**Gotchas worth remembering** (see CLAUDE.md "Lessons learned" for the full
+set):
+- **`expand_large_events=False`** is the default for BOTS time series.
+  Snowball flagging is single-threaded and adds 20× to JumpStep wall time.
 - **`AssignWcsStep` failing with "No open slits fall on detector …" is
-  often correct.** For PRISM BOTS S1600A1 the spectrum may land on only
-  one detector; the slit genuinely isn't on the other.
+  often correct** — for PRISM S1600A1 the spectrum may only land on one
+  detector. Check the other detector before assuming a bug.
+- **Calibration thresholds are tuned for post-Stage-1 ADU levels**, not
+  raw uncal (~150–250 ADU bias). Validate bgsub PNGs on `data/stage1/`
+  outputs, not `data/uncal/`.
 
-**For v2 regression tests:** the WASP-69 b ramp products are already on disk.
-Skip straight to §5.
-
-**Eventual port plan:** `tswift.calibrate(project, mode)` wrapping the jwst
-package. Not urgent — calibration is slow, deterministic, and covered by
-mature `jwst` code.
+**Rerunning a single stage.** Every function is idempotent when its output
+already exists (pass `overwrite=True` to force). Tune `bg_mask_top_rows`,
+rerun only `calibrate_bg_subtract` + `calibrate_rampfit` + `build_frame_time`,
+reinspect the PNG — the iterative workflow the pipeline is built around.
 
 ---
 

@@ -10,12 +10,10 @@ push a button and pray.
 
 Supports **NIRSpec G395H**, **NIRSpec PRISM**, and **NIRISS SOSS**.
 
-> **Status**: development (`2.0.0.dev0`). The analysis stages (extraction →
-> fitting → combining → spectrum) are ported and regression-tested bit-identical
-> against a mature predecessor pipeline on WASP-69 b. Stage-1/2 calibration
-> (uncal → ramp) is not yet ported to the v2 API — v2 starts from existing
-> ramp-fit products. See [RUNBOOK.md §4](RUNBOOK.md) for the current bridging
-> approach.
+> **Status**: development (`2.0.0.dev0`). All stages — calibration
+> (uncal → ramp + wavelength), bad-pixel masking, extraction, MCMC fitting,
+> per-wavelength spectral fitting, combining — are in the v2 API. See
+> [RUNBOOK.md](RUNBOOK.md) for each stage's call signature.
 
 ## Install
 
@@ -55,11 +53,12 @@ project = bootstrap("WASP-69 b", program="5924", outdir="./WASP-69b_v2")
 #    proprietary data if you've saved a token at ~/.mast_token)
 fetch(project, program_id="5924", target_name="WASP-69", instrument="NIRISS")
 
-# 3. Run stage1/2 calibration (jwst.pipeline — not yet wrapped in tswift v2;
-#    for now use the legacy wrapper described in RUNBOOK.md §4, or call jwst
-#    directly to produce all_frame.npy + time_all.npy + wvl.npy)
+# 3. Run calibration (uncal → ramp + wavelength)
+from tswift import run_calibrate
+run_calibrate(project, mode="SOSS", detector="nis",
+              crds_cache="~/crds_cache/")
 
-# 4. v2 analysis — the ported stages:
+# 4. Analysis stages
 from tswift import (
     mad_clip, run_extract,
     fit_wl_mcmc, compute_ld_per_wavelength, fit_spec_curves,
