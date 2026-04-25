@@ -687,6 +687,82 @@ depth(evening).
 
 ---
 
+## 9c. Red-noise diagnostics (mandatory, last stage)
+
+Every reduction ends with a red-noise check.  Quoted error bars
+assume white noise, but JWST residuals routinely have β = σ_obs / σ_white >
+1.5–3 at 30-min binning, so the assumption silently inflates retrieved
+significances unless you check.
+
+**Call:**
+```python
+from tswift import (
+    compute_wl_red_noise, plot_wl_red_noise,
+    compute_spec_red_noise, plot_spec_red_noise,
+    reconstruct_wl_residuals_from_curve,
+)
+
+t_kept, residuals = reconstruct_wl_residuals_from_curve(
+    clean_2D, time_hr, oot_mask, best_fit_curve,
+    wl_left=..., wl_right=...,
+)
+wl_result = compute_wl_red_noise(t_kept, residuals, detector="nis")
+plot_wl_red_noise(wl_result, outdir="product/red_noise",
+                  planet_name="Planet X b")
+
+spec_result = compute_spec_red_noise(
+    clean_2D, time_hr, wvl, spec_fit,
+    geom={"a": ..., "inc": ..., "t0_offset": ...},
+    period_days=..., u1_per_wvl=..., u2_per_wvl=...,
+    oot_mask=oot_mask,
+)
+plot_spec_red_noise(spec_result, outdir="product/red_noise",
+                    planet_name="Planet X b")
+```
+
+**Outputs:**
+
+- `red_noise/red_noise.png` — 6-panel WL diagnostic.
+- `red_noise/red_noise_summary.json` — WL β @ 5/15/30/60 min, ACF
+  lag-1, PSD α, skew, kurtosis.
+- `red_noise/spec_red_noise.png` — five rows (RMS, β @ 30 min,
+  ACF lag-1, PSD α, kurtosis) all vs wavelength.
+- `red_noise/spec_red_noise.npz` — per-channel arrays.
+- `red_noise/spec_red_noise_summary.json` — wavelength-averaged
+  metrics.
+
+**Sanity checks:**
+
+- [ ] WL `β @ 30 min` < 2.  If 2–3, the published error bars are
+      ~2× too tight at retrieval cadence.  If > 3, detrending was
+      probably insufficient.
+- [ ] σ-vs-bin curve sits within a factor of ~2 of the dashed
+      white-noise line at all bin sizes.  A wide gap at 30+ min is
+      classic detector 1/f.
+- [ ] ACF lag-1 < 95 % CI ≈ ±0.05 for a typical N=1500 visit.
+- [ ] Q-Q plot is straight.  Curvature in the tails ⇒ outliers
+      (re-check the bad-pixel and column repair stages).
+- [ ] Sliding RMS in panel 6 doesn't spike during ingress/egress.
+      If it does, the WL fit is mis-modelling LD.
+
+**Common pitfalls:**
+
+- *Per-channel β much higher than WL β*: usually fine.  Per-channel
+  residuals are dominated by photon noise and even a small persistent
+  correlated component looks large in fractional terms.  WL averages
+  thousands of channels down to the systematic floor.  Look at the
+  *trend* of spec β vs λ — flat is fine; sharp peaks at specific
+  wavelengths are the warning sign.
+- *β below 1 at long bins*: walker over-fitting in the WL MCMC has
+  absorbed real long-timescale variance into the slope/constant
+  parameters.  Not a bug per se, but it means quoted depth errors
+  are slightly too tight.
+- *Q-Q deviates only at ±3σ but lag-1 is fine*: residual outliers,
+  not red noise.  Re-check `bad_col_repair` and the time-domain
+  bad-pixel clip in stage 5.
+
+---
+
 ## 10. Troubleshooting decision tree
 
 **Spectrum has excess scatter (noise much higher than expected):**

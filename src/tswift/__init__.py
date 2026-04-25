@@ -70,6 +70,15 @@ from tswift.bad_columns import (
     plot_repair_diagnostics,
     RepairResult,
 )
+from tswift.red_noise import (
+    compute_wl_red_noise,
+    plot_wl_red_noise,
+    compute_spec_red_noise,
+    plot_spec_red_noise,
+    reconstruct_wl_residuals_from_curve,
+    WLRedNoiseResult,
+    SpecRedNoiseResult,
+)
 from tswift.combine import (
     rp_to_depth_ppm,
     bin_inverse_variance,
@@ -144,6 +153,13 @@ __all__ = [
     "repair_outlier_columns",
     "plot_repair_diagnostics",
     "RepairResult",
+    "compute_wl_red_noise",
+    "plot_wl_red_noise",
+    "compute_spec_red_noise",
+    "plot_spec_red_noise",
+    "reconstruct_wl_residuals_from_curve",
+    "WLRedNoiseResult",
+    "SpecRedNoiseResult",
     "rp_to_depth_ppm",
     "bin_inverse_variance",
     "combine_spectrum",
