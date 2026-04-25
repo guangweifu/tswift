@@ -441,8 +441,11 @@ def compute_spec_red_noise(
     clean_2D : (n_frames, n_cols)
     time_hr  : (n_frames,)
     wvl      : (n_cols,)  µm
-    spec_fit : (n_cols, k)  per-channel fit results.  Column order:
-        [slope, rp, LD2, constant]  (or [slope, rp, constant] if fit_ld2=False).
+    spec_fit : (n_cols, 4)  per-channel fit results from
+        `fit_spec_curves`.  Column order is **[slope, rp, constant, LD2]**
+        (matches the legacy file convention; LD2 is in column 3 even
+        when `fix_ld2=True` — in which case it equals the per-channel
+        u2 from exotic_ld and the column is read as a fixed value).
     geom : dict — fixed orbital geometry {"a", "inc", "t0_offset"}
     period_days : float
     u1_per_wvl, u2_per_wvl : (n_cols,)  limb-darkening per channel
@@ -457,23 +460,38 @@ def compute_spec_red_noise(
     import batman
     from scipy.stats import skew as _skew, kurtosis as _kurt
 
+    # Match `fit_spec_curves` exactly: model time in DAYS, normalize each
+    # channel by edge-OOT median (first + last 15 % of frames), and use
+    # `slope * (time - time[0])` baseline anchored at the visit start.
     n_frames, n_cols = clean_2D.shape
-    period_hr = period_days * 24.0
-    time_phase = np.asarray(time_hr) / period_hr
-    t_ref = float(np.median(time_hr))
-    oot_idx = np.where(oot_mask)[0]
+    time_days = np.asarray(time_hr) / 24.0
+    t0_days = geom["t0_offset"] / 24.0
     dt_min = float(np.nanmedian(np.diff(time_hr))) * 60.0
     cols_iter = list(range(0, n_cols, channel_subsample))
     n_channels = len(cols_iter)
 
-    # Build a single geometry-anchored TransitModel; reused per channel.
+    # Per-channel OOT median for normalization — replicate
+    # `fit_spec_curves`' edge-only OOT mask (first 15 % + last 15 %)
+    # because that's what the saved spec_fit was fitted against.
+    n_edge = max(10, int(n_frames * 0.15))
+    fit_oot_mask = np.zeros(n_frames, bool)
+    fit_oot_mask[:n_edge] = True
+    fit_oot_mask[-n_edge:] = True
+    with np.errstate(invalid="ignore"):
+        oot_median_per_chan = np.nanmedian(clean_2D[fit_oot_mask, :], axis=0)
+    # Channels with zero / NaN OOT median are off-trace edges; their
+    # `cl_nor` will be NaN/inf and the loop skips them via the
+    # ``valid.sum() < 100`` guard below.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cl_nor = clean_2D / oot_median_per_chan[None, :]
+
+    # Build a single geometry-anchored TransitModel reused per channel.
     p0 = batman.TransitParams()
-    p0.t0 = geom["t0_offset"] / period_hr
-    p0.per = 1.0; p0.rp = 0.1
+    p0.t0 = t0_days; p0.per = period_days; p0.rp = 0.1
     p0.a = geom["a"]; p0.inc = geom["inc"]
     p0.ecc = ecc; p0.w = omega
     p0.u = [0.3, 0.3]; p0.limb_dark = "quadratic"
-    m_geom = batman.TransitModel(p0, time_phase)
+    m_geom = batman.TransitModel(p0, time_days)
 
     rms_ppm = np.full(n_cols, np.nan)
     beta_arrs = {f"{int(b)}min": np.full(n_cols, np.nan)
@@ -494,30 +512,27 @@ def compute_spec_red_noise(
         if not np.isfinite(rp) or rp <= 0:
             continue
         u1 = float(u1_per_wvl[col]) if np.isfinite(u1_per_wvl[col]) else 0.3
-        if fit_ld2:
-            slope = float(spec_fit[col, 0])
-            ld2 = float(spec_fit[col, 2])
-            const = float(spec_fit[col, 3])
-        else:
-            slope = float(spec_fit[col, 0])
+        # Column order from fit_spec_curves: [slope, rp, constant, LD2].
+        slope = float(spec_fit[col, 0])
+        const = float(spec_fit[col, 2])
+        ld2 = float(spec_fit[col, 3])
+        if not np.isfinite(ld2) and not fit_ld2:
             ld2 = float(u2_per_wvl[col]) if np.isfinite(u2_per_wvl[col]) else 0.1
-            const = float(spec_fit[col, 2])
 
-        # Forward model with saved params.
+        # Forward model — IDENTICAL to `fit_spec_curves._model`:
+        #   m.light_curve(p) * constant + slope * (time_hr - time_hr[0])
+        # Critical: NO OOT-median renormalization of the batman flux
+        # (it's already ~1.0 at OOT by construction).  Use slope baseline
+        # anchored at time_hr[0], matching the fit.
         p = batman.TransitParams()
-        p.t0 = geom["t0_offset"] / period_hr; p.per = 1.0
+        p.t0 = t0_days; p.per = period_days
         p.rp = rp; p.a = geom["a"]; p.inc = geom["inc"]
         p.ecc = ecc; p.w = omega; p.u = [u1, ld2]; p.limb_dark = "quadratic"
         flux = m_geom.light_curve(p)
-        norm = float(np.nanmedian(flux[oot_idx])) if oot_idx.size else 1.0
-        model = (flux / norm) * const + slope * (time_hr - t_ref)
+        model = flux * const + slope * (np.asarray(time_hr) - time_hr[0])
 
-        # Channel data (normalize as in fit_spec_curves).
-        channel_lc = clean_2D[:, col]
-        ch_med = float(np.nanmedian(channel_lc[oot_mask]))
-        if not np.isfinite(ch_med) or ch_med == 0:
-            continue
-        channel_norm = channel_lc / ch_med
+        # Data: edge-OOT-normalized cl_nor — matches the fit input.
+        channel_norm = cl_nor[:, col]
         residual = channel_norm - model
         valid = np.isfinite(residual)
         if int(valid.sum()) < 100:
