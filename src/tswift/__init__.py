@@ -43,8 +43,33 @@ from tswift.extract import (
     plot_aperture_scan,
     plot_clean,
 )
-from tswift.wl_fit import fit_wl_mcmc, plot_wl_fit
+from tswift.wl_fit import (
+    fit_wl_mcmc,
+    plot_wl_fit,
+    fit_wl_mcmc_joint,
+    plot_wl_fit_joint,
+    joint_param_order,
+)
 from tswift.spec_fit import compute_ld_per_wavelength, fit_spec_curves, plot_spec_fit
+from tswift.limb_asymmetry import (
+    fit_limb_asymmetry,
+    plot_limb_asymmetry,
+    save_limb_asymmetry,
+    make_uniform_bin_edges,
+)
+from tswift.helium import (
+    check_helium_1083,
+    plot_helium,
+    HeliumResult,
+    HE_I_1083_VAC_NM,
+)
+from tswift.bad_columns import (
+    find_outlier_channels,
+    find_aperture_bad_pixels,
+    repair_outlier_columns,
+    plot_repair_diagnostics,
+    RepairResult,
+)
 from tswift.combine import (
     rp_to_depth_ppm,
     bin_inverse_variance,
@@ -100,9 +125,25 @@ __all__ = [
     "plot_clean",
     "fit_wl_mcmc",
     "plot_wl_fit",
+    "fit_wl_mcmc_joint",
+    "plot_wl_fit_joint",
+    "joint_param_order",
     "compute_ld_per_wavelength",
     "fit_spec_curves",
     "plot_spec_fit",
+    "fit_limb_asymmetry",
+    "plot_limb_asymmetry",
+    "save_limb_asymmetry",
+    "make_uniform_bin_edges",
+    "check_helium_1083",
+    "plot_helium",
+    "HeliumResult",
+    "HE_I_1083_VAC_NM",
+    "find_outlier_channels",
+    "find_aperture_bad_pixels",
+    "repair_outlier_columns",
+    "plot_repair_diagnostics",
+    "RepairResult",
     "rp_to_depth_ppm",
     "bin_inverse_variance",
     "combine_spectrum",

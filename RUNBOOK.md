@@ -443,6 +443,77 @@ sr = fit_spec_curves(
 
 ---
 
+## 8b. Bad-column repair (mandatory, run after `spec`)
+
+Stable hot pixels in the aperture (constant ~5-10 kADU/sec) survive
+`mad_clip` because that operates on time-domain outliers only.
+They bias the per-channel transit depth: when the planet transits,
+the stellar flux drops but the hot pixel's contribution stays the
+same, so the apparent depth shifts.  The shift is positive or
+negative depending on where the hot pixel sits in the aperture
+relative to the trace, but is always >100 ppm at typical brightness.
+
+**Call:**
+```python
+from tswift import repair_outlier_columns, plot_repair_diagnostics
+
+repair = repair_outlier_columns(
+    clean_2D, data_fixed, trace_fit, oot_mask, wvl, time_hr,
+    spec_fit, spec_err, u1_per_wvl, u2_per_wvl,
+    geom={"a": ..., "inc": ..., "t0_offset": ...},
+    period_days=..., aperture=(ap_lo, ap_hi),
+    trace_half_width=22,
+    detection_n_sigma=5.0,            # outlier-channel threshold
+    pixel_n_sigma_value=5.0,          # per-pixel value vs neighbour cols
+    pixel_n_sigma_var=3.0,            # per-pixel time-variability
+    post_repair_n_sigma=4.0,          # mask if repair leaves > Nσ outlier
+    protected_wvl_um=[1.0833],        # SOSS: protect He I (real signal)
+)
+np.save("product/clean_2D.npy",   repair.clean_2D_repaired)
+np.save("product/spec_fit.npy",   repair.spec_fit_repaired)
+np.save("product/spec_fit_err.npy", repair.spec_err_repaired)
+plot_repair_diagnostics(repair, wvl, outdir="product/figure",
+                        planet_name=..., detector=...)
+```
+
+**Outputs:**
+- `figure/bad_column_repair.png` — before/after spectrum panels with
+  repaired (orange) and masked (red ✕) columns flagged.
+- `figure/bad_column_repair.json` — per-column report: original
+  depth, σ, identified bad rows, action (repaired/masked), final
+  depth.
+- Updated `clean_2D.npy`, `spec_fit.npy`, `spec_fit_err.npy` —
+  downstream `combine` automatically picks up the cleaned spectrum.
+
+**Sanity checks:**
+- [ ] `n_repaired + n_masked` is small (typically <10 channels per
+      detector at 5σ on bright targets; up to ~30 on faint).  If
+      hundreds of channels are flagged, the detection threshold is
+      too tight or the 2D bad-pixel clip in stage 5 was too loose.
+- [ ] `bad_column_repair.png` after panel: flagged points sit
+      cleanly inside the local-median band.
+- [ ] He I 1083 nm column on SOSS is NOT in the flagged list.  If
+      it is, your `protected_wvl_um` is missing or the search
+      half-width is too narrow.
+
+**Common pitfalls:**
+
+- *Real molecular features flagged*: H₂O bands at 1.4 / 1.9 µm and
+  CO₂ at 4.3 µm are smooth (they affect many channels at once), so
+  the rolling-median compares each channel to its smoothed neighbours
+  and won't flag them.  Sharp features like He I 1083 nm DO need
+  protection — add to `protected_wvl_um`.
+- *No bad pixel diagnosed but channel is outlier*: usually a snowball
+  event affecting multiple rows at different times.  The fallback
+  is to mask the entire column, which the module does automatically.
+- *Repair makes the depth WORSE*: rare; happens if the bad pixel
+  detection picked the wrong row (e.g. the trace-center row got
+  flagged because the neighbour columns happened to have low values
+  due to a curving trace).  The `post_repair_n_sigma` safety-check
+  catches this and falls back to column-masking.
+
+---
+
 ## 9. Combine + save
 
 **Call:**
@@ -479,6 +550,140 @@ paths = save_spectrum(combined, outdir="product/spectrum", planet_name="WASP-69 
 - *Detector stitching offset (G395H)*: the nrs1 and nrs2 trails should overlap in
   depth within ~100 ppm. Bigger offsets indicate calibration (BG subtraction or
   wavelength solution) drift per detector — rerun calibration stage.
+
+---
+
+## 9a. (SOSS only, mandatory) He I 1083 nm pixel-level check
+
+**Always run after `spec` for SOSS targets.**  He I 1083 nm is the
+standard near-IR atmospheric escape tracer; you want to know if it
+shows up before publishing the spectrum.
+
+**Call:**
+```python
+from tswift import check_helium_1083, plot_helium
+
+result = check_helium_1083(
+    clean_2D, time_hr, wvl,
+    rp=spec_fit[:, 1], rp_err=spec_err[:, 1],
+    oot_mask=oot_mask, wl_left=..., wl_right=...,
+    t0_hr=wl_best_params["t0_offset"],
+)
+plot_helium(result, outdir="product/helium", planet_name="Planet X b")
+```
+
+**Outputs (`product/helium/`):**
+
+- `helium_pixel_spectrum.png` — per-pixel depth zoom around 1083 nm.
+  A clean detection looks like one isolated pixel sticking out 5+σ
+  above the local continuum band.
+- `helium_lightcurves.png` — He pixel LC overplotted on WL with a
+  residual panel.  In-transit residual ≈ -depth(He pixel − WL); pre
+  and post should sit near zero if there's no tail.
+- `helium_summary.json` — column, depth, excess significance,
+  pre/post/in-transit residuals under both normalizations.
+
+**Sanity checks (read the plots):**
+
+- [ ] Pixel-level zoom shows one prominent excess pixel (or no
+      excess).  If multiple adjacent pixels are excess, suspect a
+      detector-systematic — investigate before claiming detection.
+- [ ] In-transit residual is negative (channel − WL < 0) by an amount
+      consistent with `excess_above_continuum_ppm`.
+- [ ] Pre-transit residual sits near zero.  If it slopes up toward
+      ingress, the He absorption may extend across a longer baseline
+      than the WL transit and the per-channel normalization is
+      contaminated.
+- [ ] |post − pre residual| < 100 ppm.  If larger, check if it's an
+      He tail by overplotting ``he_lc_balanced`` (pre+post norm)
+      vs ``he_lc_local`` — if balanced norm gives shallower depth,
+      the local norm is biased low by a post-transit tail.
+
+**Common pitfalls:**
+
+- *SOSS WCS offset (~1 nm)*: max-excess pixel lands at 1081-1082 nm
+  rather than 1083 nm.  This is calibration, not science.  Default
+  search half-width 5 nm covers it.
+- *Wide bin masks the line*: never look for He at >5 nm bin width.
+  The line is intrinsically narrow; binning to 10 or 50 nm dilutes
+  the excess by 10–50× into the continuum.  Always look at native
+  per-pixel depths.
+- *Tail contamination of the spec-fit OOT*: if `post − pre` is
+  significantly negative on the He pixel residual, the per-channel
+  spec fit is using a contaminated baseline and reporting too-shallow
+  depth at He.  Refit that single channel with pre-transit-only OOT
+  to recover.
+
+---
+
+## 9b. (Optional) Limb-asymmetry analysis with catwoman
+
+**Skip unless you specifically want morning vs evening limb spectra.**
+Most science programs use only the symmetric `combine_spectrum` output
+above.  This stage retrieves rp1 (evening / leading limb) and rp2
+(morning / trailing limb) per bin via a per-bin catwoman MCMC.
+
+**Call:**
+```python
+from tswift import (
+    make_uniform_bin_edges, fit_limb_asymmetry,
+    plot_limb_asymmetry, save_limb_asymmetry,
+)
+
+# Geometry must come from the joint white-light fit — DON'T re-fit per bin.
+geom = {"a": 7.231, "inc": 88.39, "t0_offset": 4.505}
+
+bin_lo, bin_hi = make_uniform_bin_edges(2.78, 3.72, 100)   # 100 nm bins
+
+result = fit_limb_asymmetry(
+    clean_2D, time_hr, wvl, bin_lo, bin_hi,
+    geom=geom, period_days=3.95012,
+    u1_per_wvl=u1_arr, u2_per_wvl=u2_arr,
+    rp_mean_init=0.106, oot_mask=oot_mask,
+    fit_ld1=False,                  # CLAUDE.md pitfall #21
+    drp_range=(-0.05, 0.05),
+    nwalkers=32, nsteps=2000, nburn=600,
+)
+save_limb_asymmetry(result, outdir="product/limb_asymmetry")
+plot_limb_asymmetry(result, outdir="product/limb_asymmetry",
+                    planet_name="Planet X b", detector="nis")
+```
+
+**Outputs (per detector):**
+- `limb_asymmetry/limb_spectra.txt` — per-bin table: rp_mean, drp,
+  rp1²/rp2² (ppm), Δdepth, errors, RMS.
+- `limb_asymmetry/limb_asymmetry.npz` — full result dict.
+- `limb_asymmetry/morning_evening_spectra.png` — rp1² (blue) and
+  rp2² (red).
+- `limb_asymmetry/delta_depth_vs_wavelength.png` — Δdepth with
+  weighted-mean band.
+- `limb_asymmetry/drp_vs_wavelength.png` — radius difference.
+- `limb_asymmetry/symmetric_depth_vs_wavelength.png` — rp_mean²
+  cross-check.
+
+**Convention:** catwoman `phi=90` ⇒ rp1 = evening (leading), rp2 =
+morning (trailing).  Δdepth = rp2² − rp1² is depth(morning) −
+depth(evening).
+
+**Sanity checks:**
+- [ ] `morning_evening_spectra.png`: both spectra trace the symmetric
+      `combine_spectrum` continuum within their error bars.
+- [ ] Δdepth scatter in OOT-noise floor regions matches the per-bin
+      photon-noise expectation (typically a few × 100 ppm for hot
+      Jupiter targets).
+- [ ] Wavelength-averaged Δ should be small (<<1σ from zero) unless
+      the target genuinely has integrated asymmetry — most don't.
+
+**Common pitfalls:**
+- *drp prior too narrow*: if the posterior rails the drp_range, widen.
+  Default ±0.05 covers ±5 % of rp_mean for a hot Jupiter; widen to
+  ±0.1 for low-S/N or grazing geometries.
+- *catwoman `fac` too coarse*: default 0.001 → ~50 ppm sampling
+  noise per integration.  For sub-ppm-precision asymmetry detections
+  drop to 0.0001 (~10× slower).
+- *Geometry drift*: re-using a per-detector geometry instead of the
+  joint one re-introduces the per-detector bias the joint WL fit
+  removed (pitfall #27).  Always pass joint geometry.
 
 ---
 

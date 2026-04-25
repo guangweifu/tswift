@@ -129,26 +129,57 @@ def find_trace(
     detector: str | None = None,
     poly_order: int = 5,
     outlier_clip: float = 4.0,
+    centering: str | None = None,
+    centroid_half: int = 10,
 ) -> np.ndarray:
-    """Per-column trace row (argmax + parabolic sub-pixel + robust polynomial).
+    """Per-column trace row + robust polynomial smoothing.
+
+    Two centering algorithms — pick by the PSF shape:
+
+    - `"argmax_parab"` — argmax of a vertically smoothed column + parabolic
+      sub-pixel refinement.  Right for narrow, single-peaked PSFs (NIRSpec
+      G395H, PRISM).  ~5× cheaper than centroid mode.
+
+    - `"centroid"` — argmax seed + flux-weighted centroid in a ±centroid_half-
+      row window around the seed.  Right for wide or multi-peaked PSFs
+      where argmax snaps to one of several lobes (NIRISS SOSS GR700XD has
+      a double-peaked spatial profile, MIRI LRS has detector-defect
+      sub-peaks).  Argmax can sit 5+ rows off the PSF center of mass on
+      SOSS — the centroid stays anchored to the bright core regardless.
+
+    `centering=None` picks `"centroid"` for SOSS / MIRI_LRS and
+    `"argmax_parab"` everywhere else.
 
     Parameters
     ----------
     median_frame : (n_rows, n_cols)
         Time-median of the 2D cube after bad-pixel fixing.
-    mode : {"SOSS", "G395H", "PRISM"}
-    detector : "nis" | "nrs1" | "nrs2" | None
+    mode : {"SOSS", "G395H", "PRISM", "MIRI_LRS"}
+    detector : "nis" | "nrs1" | "nrs2" | "mirimage" | None
     poly_order : int
-        Polynomial order for the final smoothing fit. SOSS needs ≥5; NIRSpec 3 is fine.
+        Polynomial order for the final smoothing fit. SOSS needs ≥5;
+        NIRSpec 3 is fine.
     outlier_clip : float
-        Flag per-column centroids further than this many rows from a rough polynomial
-        before the final fit.
+        Flag per-column centroids further than this many rows from a
+        rough polynomial before the final fit.
+    centering : {"argmax_parab", "centroid", None}
+        Per-column centering algorithm.  None → mode-aware default.
+    centroid_half : int
+        Radius (in rows) of the centroid window around the argmax seed.
+        Empirically `10` worked best on WASP-94 A b SOSS — wider pulls in
+        background, narrower under-resolves the double peak.  Only used
+        when `centering="centroid"`.
 
     Returns
     -------
     np.ndarray, shape (n_cols,)
         Polynomial trace center for every column (float).
     """
+    if centering is None:
+        centering = "centroid" if mode in ("SOSS", "MIRI_LRS") else "argmax_parab"
+    if centering not in ("argmax_parab", "centroid"):
+        raise ValueError(f"unknown centering={centering!r}")
+
     median = fill_nan_with_nanmedian(median_frame, kernel_size=10)
     n_rows, n_cols = median.shape
 
@@ -157,7 +188,7 @@ def find_trace(
         np.where(np.isfinite(median), median, 0.0), size=3, axis=0, mode="nearest"
     )
 
-    # Pass 1: coarse argmax per column.
+    # Pass 1: coarse argmax per column (used as seed for both centering modes).
     trace_argmax = np.full(n_cols, np.nan)
     for i in range(n_cols):
         col = smoothed[:, i]
@@ -165,36 +196,56 @@ def find_trace(
             continue
         trace_argmax[i] = float(np.argmax(col))
 
-    # Pass 2: parabolic sub-pixel refinement around each argmax.
     trace_y = trace_argmax.copy()
-    for i in range(n_cols):
-        k = trace_y[i]
-        if not np.isfinite(k):
-            continue
-        k = int(k)
-        if k < 1 or k >= n_rows - 1:
-            continue
-        y0, y1, y2 = smoothed[k - 1, i], smoothed[k, i], smoothed[k + 1, i]
-        denom = y0 - 2 * y1 + y2
-        if denom != 0:
-            delta = 0.5 * (y0 - y2) / denom
-            if -1 <= delta <= 1:
-                trace_y[i] = k + delta
+    if centering == "argmax_parab":
+        # Pass 2a: parabolic sub-pixel refinement around each argmax.
+        for i in range(n_cols):
+            k = trace_y[i]
+            if not np.isfinite(k):
+                continue
+            k = int(k)
+            if k < 1 or k >= n_rows - 1:
+                continue
+            y0, y1, y2 = smoothed[k - 1, i], smoothed[k, i], smoothed[k + 1, i]
+            denom = y0 - 2 * y1 + y2
+            if denom != 0:
+                delta = 0.5 * (y0 - y2) / denom
+                if -1 <= delta <= 1:
+                    trace_y[i] = k + delta
+    else:
+        # Pass 2b: flux-weighted centroid in a ±centroid_half-row window
+        # around the argmax seed.  Pulls toward the PSF center of mass even
+        # when the brightest pixel is on one side of an asymmetric profile.
+        for i in range(n_cols):
+            k = trace_argmax[i]
+            if not np.isfinite(k):
+                continue
+            ki = int(k)
+            lo = max(0, ki - centroid_half)
+            hi = min(n_rows, ki + centroid_half + 1)
+            col = np.maximum(median[lo:hi, i], 0)   # clip negatives → no neg-mass
+            tot = np.nansum(col)
+            if tot > 0 and np.isfinite(tot):
+                rows = np.arange(lo, hi, dtype=float)
+                trace_y[i] = float(np.nansum(rows * col) / tot)
+            else:
+                trace_y[i] = np.nan
 
-    # Pass 3: robust outlier rejection.
+    # Pass 3: robust outlier rejection — clip against a provisional polynomial
+    # fit at the SAME order as the final fit.  Clipping against the global
+    # median fails for curved traces (e.g. G395H NRS2 spans ~18 rows; cols
+    # near the ends deviate by >10 from the global median, get rejected as
+    # "outliers", and the surviving cols then extrapolate a wrong shape).
     trace_clean = trace_y.copy()
     x = np.arange(n_cols)
-    if poly_order >= 5:
-        # For wide curved traces (SOSS) use a provisional fit to clip deviants.
-        valid0 = np.isfinite(trace_clean)
-        if valid0.sum() > poly_order + 1:
-            c0 = np.polyfit(x[valid0], trace_clean[valid0], min(poly_order, 5))
-            smooth = np.polyval(c0, x)
-            trace_clean[np.abs(trace_clean - smooth) > outlier_clip] = np.nan
-    else:
-        # For near-flat traces (NIRSpec) clip against the median.
-        med_trace = np.nanmedian(trace_clean)
-        trace_clean[np.abs(trace_clean - med_trace) > outlier_clip] = np.nan
+    valid0 = np.isfinite(trace_clean)
+    if valid0.sum() > poly_order + 1:
+        # `min(poly_order, 5)` keeps the provisional fit numerically stable
+        # for very high orders (matching the previous SOSS code path).
+        prov_order = min(poly_order, 5)
+        c0 = np.polyfit(x[valid0], trace_clean[valid0], prov_order)
+        smooth = np.polyval(c0, x)
+        trace_clean[np.abs(trace_clean - smooth) > outlier_clip] = np.nan
 
     valid = np.isfinite(trace_clean)
     if valid.sum() < poly_order + 1:

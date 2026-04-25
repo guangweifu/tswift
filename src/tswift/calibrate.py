@@ -117,13 +117,15 @@ def _uncal_stem(path: Path) -> str:
 def discover_uncal(uncal_dir: Path, detector: str) -> list[Path]:
     """Return sorted list of `*_<detector>_uncal.fits` in `uncal_dir`.
 
-    Excludes activity 02101 / 04102 (target acquisition and parallel
-    exposures with no usable dispersion), matching the MAST-fetch
-    convention.
+    Excludes activity 02101 (target acquisition only).  `_04102_` is the
+    science exposure activity code for BOTS time series (NIRSpec PRISM,
+    NIRSpec G395H, NIRISS SOSS) and is kept.  Filter more selectively
+    upstream via `tswift.fetch(..., filename_contains="_04102_")` if a
+    program mixes observation types.
     """
     uncal_dir = Path(uncal_dir)
     files = sorted(uncal_dir.glob(f"*_{detector}_uncal.fits"))
-    files = [f for f in files if "_02101_" not in f.name and "_04102_" not in f.name]
+    files = [f for f in files if "_02101_" not in f.name]
     if not files:
         raise FileNotFoundError(
             f"No *_{detector}_uncal.fits in {uncal_dir}. Run `tswift.fetch()` first."
@@ -294,80 +296,78 @@ def build_psf_trace_mask(
     mask_below: Optional[int] = None,
     mask_above: Optional[int] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """G395H: flux-weighted centroid trace + polynomial fit + bg mask.
+    """G395H: per-column flux-weighted centroid + polynomial fit + bg mask.
 
-    Robust against cross-correlation snap-to-integer failures on faint
-    targets (see CLAUDE.md pitfall #7).  The returned `trace_fit` is
-    the per-column row of the spectral trace, useful as a seed for
-    the analysis-layer aperture finder.
+    Builds a 2-D background mask (1.0 in bg, NaN over the trace) by:
+
+    1. Collapsing the 4-D Stage-1 cube `(n_ints, n_groups, n_rows, n_cols)`
+       to a 2-D median `(n_rows, n_cols)` over both integrations and groups.
+       This is much higher-SNR than the single frame `dark_data[0, -1]` we
+       used to use, and it tracks the *time-median* trace (the same thing
+       the analysis layer's `extract.find_trace` sees on the rate cube), so
+       the bg-mask trace and the extraction trace stay aligned.
+
+    2. Delegating per-column centroid + polynomial fit to the shared
+       trace-finder `tswift.extract.find_trace`.  Same algorithm as the
+       extraction stage uses, so `bg_mask` and the analysis trace can't
+       silently drift apart.  CLAUDE.md pitfall #9 (mask must cover wings)
+       and the "two-trace-finder divergence" lesson observed on WASP-94 A
+       NRS2 (high-col trace excursion incorrectly rejected by global
+       median-deviation outlier filter) drive this design.
+
+    3. Symmetric `mask_below + mask_above`-row mask around `trace_fit`.
 
     Parameters
     ----------
     dark_data : 4-D array
-        (n_ints, n_groups, n_rows, n_cols) as emitted by Stage 1.
+        Stage-1 cube `(n_ints, n_groups, n_rows, n_cols)`.
     detector : str
-        `nrs1` or `nrs2`.  Sets expected trace band and polynomial
-        column trim (`nrs1` has edge artifacts below col 600).
+        `nrs1` or `nrs2`.  Picks the polynomial column trim (`nrs1` has
+        edge artifacts below col ~600 where there is no trace).
 
     Returns
     -------
     bg_mask : 2-D array
         1.0 where bg, NaN where trace.
     trace_fit : 1-D array
-        Trace row position per column.
+        Polynomial trace row per column.
     """
-    # Use the last group of the first integration — highest SNR, minimal
-    # 1/f contamination since ramp hasn't accumulated yet.
-    frame = _fill_nan_with_local_median(dark_data[0, -1, :, :].astype(np.float64))
+    # Time-median of the last (highest-signal) group across all integrations.
+    # ~sqrt(n_ints) better SNR than the single frame `dark_data[0, -1]` we
+    # used to use, and tracks the time-median trace — the same thing the
+    # analysis layer's `find_trace` sees on the rate cube.  Using only the
+    # last group avoids materializing a 5-GB intermediate that
+    # `np.nanmedian(dark_data, axis=(0, 1))` would otherwise produce.
+    frame = np.nanmedian(dark_data[:, -1, :, :], axis=0).astype(np.float64)
+    frame = _fill_nan_with_local_median(frame)
     n_rows, n_cols = frame.shape
 
     if detector == "nrs1":
-        psf_lo, psf_hi = 11, 21
         poly_trim = 600 if n_cols > 1000 else 0
         mask_below = 9 if mask_below is None else mask_below
         mask_above = 9 if mask_above is None else mask_above
     else:
-        psf_lo, psf_hi = 7, 17
         poly_trim = 0
         mask_below = 7 if mask_below is None else mask_below
         mask_above = 7 if mask_above is None else mask_above
 
-    centroid_rows = np.arange(psf_lo, psf_hi, dtype=float)
-    trace_y = np.full(n_cols, np.nan)
-    for c in range(n_cols):
-        col = np.maximum(frame[psf_lo:psf_hi, c], 0)
-        tot = np.nansum(col)
-        if tot > 0 and np.isfinite(tot):
-            trace_y[c] = np.nansum(centroid_rows * col) / tot
-
-    med_trace = np.nanmedian(trace_y)
-    if not np.isfinite(med_trace):
-        # Degenerate input (all-zero, all-NaN): fall back to the PSF band center
-        med_trace = 0.5 * (psf_lo + psf_hi)
-        logger.warning(
-            "PSF trace: data has no positive centroid, falling back to band midpoint %.2f",
-            med_trace,
-        )
-    trace_y[np.abs(trace_y - med_trace) > 8] = np.nan
-
-    x = np.arange(n_cols)
-    valid = np.isfinite(trace_y)
+    # Use the same trace-finder the extraction stage uses, so bg-mask and
+    # aperture stay tied to the same per-column centroids.
+    from tswift.extract import find_trace
+    poly_order = 0 if n_cols <= 512 else 3
+    trace_fit = find_trace(
+        frame,
+        mode="G395H", detector=detector,
+        poly_order=poly_order, outlier_clip=4.0,
+    )
     if poly_trim > 0:
-        valid &= x >= poly_trim
-
-    if valid.sum() < 10:
-        logger.warning("PSF trace: <10 valid columns, using constant median %.2f", med_trace)
-        trace_fit = np.full(n_cols, med_trace, dtype=float)
-    else:
-        poly_order = 0 if n_cols <= 512 else 3
-        coeffs = np.polyfit(x[valid], trace_y[valid], poly_order)
-        trace_fit = np.polyval(coeffs, x)
-        if poly_trim > 0:
-            trace_fit[:poly_trim] = trace_fit[poly_trim]
-        logger.info(
-            "PSF trace: poly order %d, median row %.3f",
-            poly_order, np.nanmedian(trace_fit),
-        )
+        trace_fit[:poly_trim] = trace_fit[poly_trim]
+    logger.info(
+        "PSF trace [%s]: poly order %d, row range %.2f–%.2f (median %.2f)",
+        detector, poly_order,
+        float(np.nanmin(trace_fit)), float(np.nanmax(trace_fit)),
+        float(np.nanmedian(trace_fit)),
+    )
 
     bg_mask = np.ones((n_rows, n_cols), dtype=np.float64)
     for c in range(n_cols):
@@ -749,20 +749,22 @@ def _stage2_wvl_soss(
         rate = np.nanmedian(rate, axis=0)  # collapse ints
     n_rows, n_cols = rate.shape
 
-    # Crude trace estimate: argmax per column.
-    trace_y = np.full(n_cols, np.nan)
-    for c in range(n_cols):
-        col = rate[:, c]
-        if np.nanmax(col) > 0 and np.any(np.isfinite(col)):
-            trace_y[c] = float(np.nanargmax(col))
-
-    valid = np.isfinite(trace_y)
-    if valid.sum() < 50:
+    # Trace: same finder as the analysis stage (`tswift.extract.find_trace`)
+    # so the WCS is evaluated on the same row the extraction will use.
+    # `mode="SOSS"` activates the centroid-mode default, which keeps the
+    # trace anchored to the PSF center of mass instead of letting argmax
+    # snap to whichever lobe of the double-peaked GR700XD profile is
+    # momentarily brightest.
+    from tswift.extract import find_trace
+    trace_fit = find_trace(
+        rate, mode="SOSS", detector="nis",
+        poly_order=5, outlier_clip=4.0,
+    )
+    trace_fit = np.clip(trace_fit, 0, n_rows - 1)
+    if not np.all(np.isfinite(trace_fit)):
         raise RuntimeError(
-            "SOSS Stage 2: <50 cols with positive flux — cannot fit trace."
+            "SOSS Stage 2: find_trace failed to return a finite trace fit."
         )
-    coeffs = np.polyfit(np.arange(n_cols)[valid], trace_y[valid], 5)
-    trace_fit = np.clip(np.polyval(coeffs, np.arange(n_cols)), 0, n_rows - 1)
 
     # Save the Stage-2 trace fit for analysis use.
     product_dir = Path(product_dir)
