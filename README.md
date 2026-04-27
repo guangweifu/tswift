@@ -1,4 +1,4 @@
-# tswift
+# tswift (Transit swift)
 
 **JWST transit spectroscopy pipeline — from raw MAST data to a transmission spectrum.**
 
