@@ -16,9 +16,9 @@ Approach (mirrors the TOI-6894 b reference reduction)
   (small).  Sampling the natural axes of the posterior avoids the strong
   rp1↔rp2 anti-correlation that wastes MCMC steps.
 - **Geometry FIXED** to the joint white-light catwoman/batman fit:
-  `a, inc, t0_offset, period, ecc, omega` are all locked to the values
-  passed in `geom` so each bin's MCMC fits only `slope, rp_mean, drp,
-  constant, [LD1,] LD2`.
+  `a, inc, t0_offset` are locked via `geom`, and `period_days, ecc, omega`
+  via their own function arguments, so each bin's MCMC fits only
+  `slope, rp_mean, drp, constant, [LD1,] LD2`.
 - **LD1 fixed by default** (CLAUDE.md pitfall #21) — fitting both LD1
   and LD2 opens the LD1↔LD2 ridge that masquerades as drp.
 
@@ -63,7 +63,10 @@ def make_uniform_bin_edges(
     Returns ``(bin_edges_lo_um, bin_edges_hi_um)`` of equal length.
     """
     width_um = bin_width_nm / 1000.0
-    edges = np.arange(wvl_um_lo, wvl_um_hi + width_um, width_um)
+    # Round to the nearest whole number of bins so the grid covers
+    # [lo, hi] without np.arange's float-stop overshoot (one extra bin past hi).
+    n_bins = max(1, int(round((wvl_um_hi - wvl_um_lo) / width_um)))
+    edges = wvl_um_lo + width_um * np.arange(n_bins + 1)
     return edges[:-1], edges[1:]
 
 
@@ -290,8 +293,7 @@ def fit_limb_asymmetry(
     for i in range(n_bins):
         col_lo, col_hi = int(cols_lo[i]), int(cols_hi[i])
         if col_hi <= col_lo:
-            keep[:] = keep   # bin invalid; don't touch keep
-            continue
+            continue  # bin invalid; leave `keep` untouched
         chunk = clean_2D[:, col_lo:col_hi]
         # nansum across cols; mark frames where ALL cols NaN as NaN.
         f = np.nansum(chunk, axis=1)

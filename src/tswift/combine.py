@@ -114,9 +114,17 @@ def combine_spectrum(
     binned = {}
     for width_nm in bin_widths_nm:
         width_um = width_nm / 1000.0
-        edges = np.arange(lo, hi + width_um, width_um)
-        if len(edges) < 2:
+        # Deterministic edge count (np.arange's float stop can silently drop the
+        # reddest partial bin). ceil guarantees the last edge reaches >= hi.
+        n_bins = int(np.ceil((hi - lo) / width_um))
+        if n_bins < 1:
             continue
+        edges = lo + width_um * np.arange(n_bins + 1)
+        # bin_inverse_variance uses a half-open [lo, hi) test, so nudge the final
+        # edge just past hi to keep the reddest sample when (hi-lo) is an exact
+        # multiple of the bin width.
+        if edges[-1] <= hi:
+            edges[-1] = np.nextafter(hi, hi + 1.0)
         wc, dep, err = bin_inverse_variance(w_good, d_good, e_good, edges)
         binned[f"{int(width_nm)}nm"] = {
             "wvl_um": wc,
@@ -154,8 +162,11 @@ def combine_detectors(
     detectors : dict[name, {"wvl_um":..., "rp":..., "rp_err":...}]
         One entry per detector.
 
-    Used for NIRSpec G395H (nrs1+nrs2). Wavelength ranges from the two detectors
-    should not overlap; if they do the overlap is kept and sorted by wavelength.
+    Used for NIRSpec G395H (nrs1+nrs2), whose wavelength ranges do not overlap.
+    If detectors did overlap, native-resolution channels are concatenated and
+    sorted but kept as duplicates (NOT merged at native resolution); only the
+    binned outputs combine overlapping channels, via inverse-variance weighting
+    within each bin.
     """
     all_w, all_rp, all_err = [], [], []
     for name, d in detectors.items():

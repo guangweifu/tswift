@@ -178,7 +178,8 @@ def test_validate_mode_roundtrip():
     assert _validate_mode("G395H") == "G395H"
     assert _validate_mode("soss") == "SOSS"
     assert _validate_mode("MIRI_LRS") == "MIRI_LRS"
-    assert _validate_mode("miri") == "MIRI"
+    assert _validate_mode("miri") == "MIRI_LRS"
+    assert _validate_mode("MIRILRS") == "MIRI_LRS"
     with pytest.raises(ValueError):
         _validate_mode("NIRCAM")
 

@@ -449,8 +449,12 @@ def compute_spec_red_noise(
     geom : dict — fixed orbital geometry {"a", "inc", "t0_offset"}
     period_days : float
     u1_per_wvl, u2_per_wvl : (n_cols,)  limb-darkening per channel
-    oot_mask : (n_frames,) bool — used only for normalization
-    fit_ld2 : bool — must match what `fit_spec_curves` used
+    oot_mask : (n_frames,) bool — accepted for API symmetry but IGNORED.
+        To match `fit_spec_curves` exactly this function recomputes the
+        ~15%-edge OOT window internally; the passed mask is not used.
+    fit_ld2 : bool — must match what `fit_spec_curves` used. NOTE the polarity
+        is INVERTED vs `fit_spec_curves(fix_ld2=...)`: here `fit_ld2=True`
+        (default) == `fit_spec_curves(fix_ld2=False)`.
     channel_subsample : int — compute every Nth channel (default 1 = all)
 
     Returns

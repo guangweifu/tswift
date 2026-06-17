@@ -1,18 +1,15 @@
-"""Pydantic data contracts — the load-bearing interface of tswift.
+"""Pydantic data contracts for tswift.
 
-Three schemas flow between pipeline steps:
-
-- `Target`      — system parameters (auto-populated from NASA Exoplanet Archive)
-- `Manifest`    — one per step execution (inputs, outputs, params, status)
-- `Diagnostics` — one per step execution (metrics + pass/fail checks + figures)
-
-An agent reads these to reason about project state; humans read the figures.
+`Target` is the load-bearing schema: system parameters auto-populated from the
+NASA Exoplanet Archive (`target_db.query_target`) and consumed by every fitting
+stage. Write a target.json by hand if you must, but prefer `bootstrap()` and
+override individual fields via `config.yaml`.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -92,100 +89,4 @@ class Target(BaseModel):
 
     @classmethod
     def from_json(cls, path: Path) -> "Target":
-        return cls.model_validate_json(Path(path).read_text())
-
-
-# ----------------------------------------------------------------------------
-# Manifest
-# ----------------------------------------------------------------------------
-
-class FileRef(BaseModel):
-    path: str
-    sha256: str
-
-
-ManifestStatus = Literal["running", "ok", "failed", "skipped"]
-
-
-class Manifest(BaseModel):
-    """Records one step execution. Inputs/outputs hashed for downstream invalidation."""
-
-    step: str
-    tswift_version: str
-    mode: str = Field(description="'SOSS' | 'G395H' | 'PRISM'")
-    detector: Optional[str] = Field(
-        default=None, description="'nrs1' | 'nrs2' | 'nis' | None (global step)"
-    )
-    started_at: datetime
-    finished_at: Optional[datetime] = None
-    status: ManifestStatus = "running"
-    inputs: dict[str, FileRef] = {}
-    outputs: dict[str, FileRef] = {}
-    params: dict = {}
-    diagnostics_ref: Optional[str] = Field(
-        default=None, description="Relative path to the step's diagnostics.json"
-    )
-    git_sha: Optional[str] = None
-
-    def to_json(self, path: Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.model_dump_json(indent=2))
-
-    @classmethod
-    def from_json(cls, path: Path) -> "Manifest":
-        return cls.model_validate_json(Path(path).read_text())
-
-
-# ----------------------------------------------------------------------------
-# Diagnostics
-# ----------------------------------------------------------------------------
-
-CheckStatus = Literal["pass", "warn", "fail"]
-
-
-class CheckResult(BaseModel):
-    """One pass/fail check against a step's output.
-
-    `value` and `threshold` are optional but encouraged: they let an agent see both
-    "what happened" and "what the bar was", enabling smarter fix proposals.
-    """
-
-    name: str
-    status: CheckStatus
-    value: Optional[float | bool | str] = None
-    threshold: Optional[float] = None
-    detail: Optional[str] = None
-
-
-class Diagnostics(BaseModel):
-    """One step's structured output for agent/human review."""
-
-    step: str
-    metrics: dict[str, float | int | str | bool] = {}
-    checks: list[CheckResult] = []
-    warnings: list[str] = []
-    errors: list[str] = []
-    figures: list[str] = Field(
-        default_factory=list, description="Relative paths to PNGs"
-    )
-
-    @property
-    def all_pass(self) -> bool:
-        return (
-            all(c.status == "pass" for c in self.checks)
-            and not self.errors
-        )
-
-    @property
-    def has_failures(self) -> bool:
-        return any(c.status == "fail" for c in self.checks) or bool(self.errors)
-
-    def to_json(self, path: Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.model_dump_json(indent=2))
-
-    @classmethod
-    def from_json(cls, path: Path) -> "Diagnostics":
         return cls.model_validate_json(Path(path).read_text())

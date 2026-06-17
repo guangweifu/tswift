@@ -1,4 +1,8 @@
-"""He I 1083 nm pixel-level check for SOSS / NIRSpec PRISM transits.
+"""He I 1083 nm pixel-level check for SOSS transits.
+
+(In principle this works for any mode whose bandpass covers 1.083 µm, but only
+SOSS is exercised in the pipeline — the ±5 nm WCS-offset search below is tuned
+to SOSS GR700XD.)
 
 The metastable He I triplet at 1083.3 nm (vacuum) is the standard
 near-IR escaping-atmosphere tracer.  When the planet has a hydrodynamic
@@ -46,8 +50,9 @@ Use as a normal pipeline step:
     from tswift import check_helium_1083, plot_helium
 
     result = check_helium_1083(
-        clean_2D, time_hr, wvl, spec_fit_rp, spec_fit_rp_err, oot_mask,
-        wl_best=wl_best,
+        clean_2D, time_hr, wvl,
+        rp=spec_fit[:, 1], rp_err=spec_err[:, 1], oot_mask=oot_mask,
+        wl_left=..., wl_right=..., t0_hr=wl_best["t0_offset"],
     )
     plot_helium(result, outdir="product/helium",
                 planet_name="Planet X b")
@@ -233,7 +238,11 @@ def check_helium_1083(
     cont_mad = float(np.nanmedian(np.abs(depth[cont_idx] - cont_med))) * 1.4826
     if not np.isfinite(cont_med):
         cont_med = float(np.nanmedian(depth[cols_zoom]))
-        cont_mad = float(np.nanstd(depth[cols_zoom]))
+        # Keep the robust MAD scaling consistent with the primary path; only
+        # fall back to a plain std if the MAD itself is non-finite.
+        cont_mad = float(np.nanmedian(np.abs(depth[cols_zoom] - cont_med))) * 1.4826
+        if not np.isfinite(cont_mad):
+            cont_mad = float(np.nanstd(depth[cols_zoom]))
 
     # Excess significance per pixel in the search window.
     sig_search = (depth[cols_search] - cont_med) / np.maximum(

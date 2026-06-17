@@ -8,7 +8,9 @@ next to the knob that fixes them. It's designed so an LLM agent (or a human)
 can inspect intermediate products, diagnose problems, and iterate — not just
 push a button and pray.
 
-Supports **NIRSpec G395H**, **NIRSpec PRISM**, and **NIRISS SOSS**.
+Supports **NIRSpec PRISM**, **NIRSpec G395H**, **NIRISS SOSS**, and **MIRI LRS**
+(MIRI LRS is supported through calibration; the extraction→spectrum path is
+wired for NIRSpec + SOSS).
 
 > **Status**: development (`2.0.0.dev0`). All stages — calibration
 > (uncal → ramp + wavelength), bad-pixel masking, extraction, MCMC fitting,
@@ -47,7 +49,7 @@ the exact Python call, sanity checks, and failure modes.
 from tswift import bootstrap, fetch
 
 # 1. Bootstrap a project dir, auto-populate target.json from NASA Exoplanet Archive
-project = bootstrap("WASP-69 b", program="5924", outdir="./WASP-69b_v2")
+project = bootstrap("WASP-69 b", program="5924", outdir="./WASP-69 b")
 
 # 2. Download uncal.fits from MAST (the token-gated call also works for
 #    proprietary data if you've saved a token at ~/.mast_token)
@@ -83,17 +85,22 @@ python tests/test_t0_cache.py
 
 | Module | What it does |
 |--------|--------------|
-| `tswift.contracts` | Pydantic models for `Target`, `Manifest`, `Diagnostics` |
+| `tswift.contracts` | Pydantic `Target` schema (system parameters from the NASA Exoplanet Archive) |
 | `tswift.target_db` | NASA Exoplanet Archive query → populated `Target` |
 | `tswift.mast` | List + fetch JWST observations (public + proprietary) |
 | `tswift.bootstrap` | `bootstrap(planet, program)` → project dir + target.json |
+| `tswift.calibrate` | uncal → ramp + per-column wavelength (PRISM / G395H / SOSS / MIRI LRS) |
 | `tswift.bad_pixel` | MAD-robust per-pixel clipping (`mad_clip`) + diagnostic plot |
 | `tswift.extract` | Trace find + aperture optimize + per-channel clean |
 | `tswift.transit_model` | batman wrapper with correct t0 caching |
-| `tswift.wl_fit` | White-light `emcee` MCMC |
+| `tswift.wl_fit` | White-light `emcee` MCMC (single-detector + joint multi-detector) |
 | `tswift.spec_fit` | Per-wavelength `scipy.curve_fit` with `exotic_ld` LD |
+| `tswift.bad_columns` | Stable-hot-pixel column repair after the per-channel fit |
 | `tswift.combine` | Rebin + stitch detectors + inverse-variance weighting |
 | `tswift.spectrum` | Save final figure + text files + summary JSON |
+| `tswift.red_noise` | White-light + per-channel red-noise / β-factor diagnostics |
+| `tswift.helium` | He I 1083 nm pixel-level escape check (SOSS) |
+| `tswift.limb_asymmetry` | Optional morning/evening limb-asymmetry fit (`catwoman`) |
 
 ## License
 

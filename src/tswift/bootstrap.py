@@ -34,9 +34,7 @@ _PROJECT_SUBDIRS = [
     "data/group_bg",
     "data/ramp",
     "product",
-    "figures",
     "logs",
-    "manifests",
 ]
 
 
@@ -50,7 +48,7 @@ _CONFIG_TEMPLATE = """\
 # combine options. Agent or human edits happen here, not in target.json.
 
 instrument:
-  mode: null          # "SOSS" | "G395H" | "PRISM" — set after `tswift fetch` confirms the obs
+  mode: null          # "SOSS" | "G395H" | "PRISM" | "MIRI_LRS" — set after `tswift fetch` confirms the obs
 
 paths:
   crds_cache: "~/crds_cache/"

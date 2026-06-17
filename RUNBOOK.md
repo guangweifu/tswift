@@ -98,7 +98,7 @@ stage and rerun downstream — don't move on.**
 **Call:**
 ```python
 from tswift import bootstrap
-project = bootstrap("WASP-69 b", program="5924", outdir="./WASP-69b_v2")
+project = bootstrap("WASP-69 b", program="5924", outdir="./WASP-69 b")
 ```
 
 **Inputs:**
@@ -355,8 +355,10 @@ result = fit_wl_mcmc(
     fit_ld1=False,
     nwalkers=48, nsteps=8000, nburn=3000,
 )
-# result["best_params"]    (ndim,)   median posterior
-# result["best_errors"]    (ndim, 2) [lower_err, upper_err]
+# result["best_params"]    (ndim,)   MAP (argmax log_prob) — pitfall #25
+# result["median_params"]  (ndim,)   marginal median (reference)
+# result["best_errors"]    (ndim, 2) [lower_err, upper_err] around MAP
+# result["log_prob"]       (nsamples,) log-prob of each flat sample
 # result["samples"]        flat chain (post-burn)
 # result["chain"]          raw (nsteps, nwalkers, ndim)
 # result["acceptance"]     per-walker
@@ -825,7 +827,7 @@ change source):
 - `extraction.trace_half_width`, `.aperture_criterion`, `.wavelength_left/right`
 - `bad_pixel.n_sigma`, `.min_sigma`
 - `mcmc.nwalkers`, `.nsteps`, `.nburn`, `.initial`, `.priors`, `.mask_indices`, `.fit_ld1`
-- `curve_fit.bounds`, `.fix_ld2_stagger`
+- `curve_fit.bounds`, `.fix_ld2`
 - `combine.bin_widths_nm`, `.bad_wavelengths`
 - `paths.crds_cache`, `.ld_data`
 

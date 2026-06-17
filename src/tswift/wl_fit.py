@@ -113,8 +113,10 @@ def fit_wl_mcmc(
     Returns
     -------
     dict
-        best_params   : (ndim,) median over post-burn samples
-        best_errors   : (ndim, 2) 16/84-percentile errors
+        best_params   : (ndim,) MAP (argmax log_prob), per pitfall #25
+        median_params : (ndim,) marginal median, for reference
+        best_errors   : (ndim, 2) 16/84-percentile credible interval around MAP
+        log_prob      : (nsamples,) log-probability of each flat sample
         samples       : (nsteps*nwalkers - nburn*nwalkers, ndim) flattened chain
         chain         : (nsteps, nwalkers, ndim) raw chain
         param_order   : list[str]
@@ -163,10 +165,19 @@ def fit_wl_mcmc(
 
     chain = sampler.get_chain()                       # (nsteps, nwalkers, ndim)
     flat = sampler.get_chain(discard=nburn, flat=True)
-    best = np.percentile(flat, 50, axis=0)
+    log_prob_flat = sampler.get_log_prob(discard=nburn, flat=True)
+
+    # CLAUDE.md pitfall #25: save the MAP (argmax log_prob), not the marginal
+    # median.  On the a-inc transit-duration ridge the marginal median lands
+    # OFF the ridge, fitting worse than any actual sample.  The joint fit does
+    # the same — keep the two flavours consistent (the single-detector geometry
+    # is frozen as fixed input to every spectroscopic channel for SOSS/PRISM).
+    map_idx = int(np.nanargmax(log_prob_flat))
+    best = flat[map_idx].copy()
+    median = np.percentile(flat, 50, axis=0)
     lo = np.percentile(flat, 16, axis=0)
     hi = np.percentile(flat, 84, axis=0)
-    errors = np.stack([best - lo, hi - best], axis=1)  # (ndim, 2)
+    errors = np.stack([best - lo, hi - best], axis=1)  # (ndim, 2), around MAP
 
     # Render best-fit (in main process — globals already initialized).
     best_fit = tm.transit_model(best, time_data_hr)
@@ -174,9 +185,11 @@ def fit_wl_mcmc(
     rms = float(np.std(residuals))
 
     return {
-        "best_params": best,
+        "best_params": best,                 # MAP (argmax log_prob)
+        "median_params": median,             # marginal median, for reference
         "best_errors": errors,
         "samples": flat,
+        "log_prob": log_prob_flat,
         "chain": chain,
         "param_order": param_order,
         "ndim": ndim,
@@ -324,14 +337,24 @@ def plot_wl_fit(
 _JOINT: dict = {}
 
 
-def joint_param_order(detector_names: list[str], fit_ld1: bool) -> list[str]:
+def joint_param_order(
+    detector_names: list[str],
+    fit_ld1: bool,
+    detrend_names: tuple[str, ...] = (),
+) -> list[str]:
     """Joint-fit parameter order.
 
     Per-detector params come first (each detector grouped together, in the
     order given by `detector_names`), then the three shared parameters.
+
+    ``detrend_names`` (e.g. ``("cy", "cx")``) appends one free linear
+    coefficient per detector for each external regressor (pointing-drift
+    position vectors).  Empty by default → identical to the un-detrended
+    parameterization.
     """
     per = ["slope", "rp", "LD1", "LD2", "constant"] if fit_ld1 else \
           ["slope", "rp", "LD2", "constant"]
+    per = per + list(detrend_names)
     order: list[str] = []
     for d in detector_names:
         order.extend(f"{p}_{d}" for p in per)
@@ -340,9 +363,9 @@ def joint_param_order(detector_names: list[str], fit_ld1: bool) -> list[str]:
 
 
 def _split_joint_theta(
-    theta: np.ndarray, n_det: int, fit_ld1: bool
+    theta: np.ndarray, n_det: int, fit_ld1: bool, n_detrend: int = 0
 ) -> tuple[list[np.ndarray], float, float, float]:
-    per = 5 if fit_ld1 else 4
+    per = (5 if fit_ld1 else 4) + n_detrend
     chunks = [theta[i * per:(i + 1) * per] for i in range(n_det)]
     a, inc, t0 = theta[per * n_det:per * n_det + 3]
     return chunks, float(a), float(inc), float(t0)
@@ -359,15 +382,18 @@ def _eval_joint_model(theta: np.ndarray) -> list[np.ndarray]:
     """
     detectors = _JOINT["detectors"]
     fit_ld1 = _JOINT["fit_ld1"]
-    chunks, a, inc, t0 = _split_joint_theta(theta, len(detectors), fit_ld1)
+    n_detrend = _JOINT.get("n_detrend", 0)
+    base_n = 5 if fit_ld1 else 4
+    chunks, a, inc, t0 = _split_joint_theta(theta, len(detectors), fit_ld1, n_detrend)
 
     out: list[np.ndarray] = []
     for det, chunk in zip(detectors, chunks):
+        base = chunk[:base_n]
         if fit_ld1:
-            slope, rp, LD1, LD2, constant = chunk
+            slope, rp, LD1, LD2, constant = base
             single_theta = np.array([slope, rp, LD1, LD2, constant, a, inc, t0])
         else:
-            slope, rp, LD2, constant = chunk
+            slope, rp, LD2, constant = base
             LD1 = det["u1"]
             single_theta = np.array([slope, rp, LD2, constant, a, inc, t0])
 
@@ -376,7 +402,17 @@ def _eval_joint_model(theta: np.ndarray) -> list[np.ndarray]:
         tm._G["u2"] = det["u2"]
         tm._G["norm_range"] = det["oot_indices"]
         tm._G["time_data_ref"] = det["time_data_ref"]
-        out.append(tm.transit_model(single_theta, det["time_data_hr"]))
+        model = tm.transit_model(single_theta, det["time_data_hr"])
+
+        # Additive linear decorrelation against external regressors (pointing
+        # drift).  `detrend_vectors` is (N_i, n_detrend); coeffs are the last
+        # `n_detrend` entries of this detector's chunk.  These add a common-mode
+        # systematics term, NOT a transit-shape term, so they sit outside the
+        # batman model.
+        if n_detrend:
+            dv = det["detrend_vectors"]            # (N_i, n_detrend)
+            model = model + dv @ np.asarray(chunk[base_n:], dtype=float)
+        out.append(model)
     return out
 
 
@@ -398,7 +434,8 @@ def _log_probability_joint(theta: np.ndarray) -> float:
     return lp + ll
 
 
-def _init_joint_globals(detectors, fit_ld1, period_hr, ecc, omega, priors):
+def _init_joint_globals(detectors, fit_ld1, period_hr, ecc, omega, priors,
+                        detrend_names=()):
     """Pool-worker initializer for the joint fit.
 
     Sets up both `_JOINT` (this module's joint state) and `tm._G` (the
@@ -408,6 +445,8 @@ def _init_joint_globals(detectors, fit_ld1, period_hr, ecc, omega, priors):
     """
     _JOINT["detectors"] = detectors
     _JOINT["fit_ld1"] = fit_ld1
+    _JOINT["detrend_names"] = list(detrend_names)
+    _JOINT["n_detrend"] = len(detrend_names)
 
     # transit_model module-level shared state (set once per worker).
     tm._G["fit_ld1"] = fit_ld1
@@ -417,7 +456,7 @@ def _init_joint_globals(detectors, fit_ld1, period_hr, ecc, omega, priors):
     tm._G["_tm_cache"] = {}
 
     # Joint log-prior — uniform bounds on every parameter in the joint order.
-    order = joint_param_order([d["name"] for d in detectors], fit_ld1)
+    order = joint_param_order([d["name"] for d in detectors], fit_ld1, detrend_names)
     missing = [p for p in order if p not in priors]
     if missing:
         raise KeyError(f"Joint priors missing for: {missing}")
@@ -441,6 +480,7 @@ def fit_wl_mcmc_joint(
     initial: dict,
     priors: dict,
     fit_ld1: bool = False,
+    detrend_names: tuple[str, ...] = (),
     nwalkers: int = 64,
     nsteps: int = 10000,
     nburn: int = 4000,
@@ -518,9 +558,17 @@ def fit_wl_mcmc_joint(
         td["u2"]           = float(d["u2"])
         td["time_data_ref"] = float(d.get("time_data_ref",
                                           np.median(td["time_data_hr"])))
+        if detrend_names:
+            dv = np.asarray(d["detrend_vectors"], dtype=float)
+            if dv.ndim != 2 or dv.shape != (td["time_data_hr"].size, len(detrend_names)):
+                raise ValueError(
+                    f"[{td['name']}] detrend_vectors must be "
+                    f"({td['time_data_hr'].size}, {len(detrend_names)}); got {dv.shape}"
+                )
+            td["detrend_vectors"] = dv
         detectors_norm.append(td)
 
-    order = joint_param_order(det_names, fit_ld1)
+    order = joint_param_order(det_names, fit_ld1, detrend_names)
     missing = [p for p in order if p not in initial]
     if missing:
         raise KeyError(f"Joint initial values missing for: {missing}")
@@ -539,7 +587,8 @@ def fit_wl_mcmc_joint(
         ndim, fit_ld1, ncpu,
     )
 
-    init_args = (detectors_norm, fit_ld1, period_hr, ecc, omega, priors)
+    init_args = (detectors_norm, fit_ld1, period_hr, ecc, omega, priors,
+                 detrend_names)
     # Initialize in main process too — for best-fit rendering after MCMC.
     _init_joint_globals(*init_args)
 
@@ -566,7 +615,8 @@ def fit_wl_mcmc_joint(
     # Errors quoted around MAP using ±34% credible interval.
     errors = np.stack([best - lo16, hi84 - best], axis=1)
 
-    # Per-detector best-fit curves + residuals — at MAP.
+    # Per-detector best-fit curves + residuals — at MAP.  (_init_joint_globals
+    # ran in the parent above, so _eval_joint_model sees n_detrend here too.)
     models = _eval_joint_model(best)
     best_fit_curve_per_det = {d["name"]: m for d, m in zip(detectors_norm, models)}
     residuals_per_det = {
@@ -581,9 +631,10 @@ def fit_wl_mcmc_joint(
     ))
 
     # Map joint best params → per-detector flat dicts (bare names) for spec.
-    chunks, a_b, inc_b, t0_b = _split_joint_theta(best, len(detectors_norm), fit_ld1)
-    per_det_names = ["slope", "rp", "LD1", "LD2", "constant"] if fit_ld1 else \
-                    ["slope", "rp", "LD2", "constant"]
+    chunks, a_b, inc_b, t0_b = _split_joint_theta(
+        best, len(detectors_norm), fit_ld1, len(detrend_names))
+    per_det_names = (["slope", "rp", "LD1", "LD2", "constant"] if fit_ld1 else
+                     ["slope", "rp", "LD2", "constant"]) + list(detrend_names)
     best_per_det: dict[str, dict] = {}
     for det, chunk in zip(detectors_norm, chunks):
         best_per_det[det["name"]] = {
