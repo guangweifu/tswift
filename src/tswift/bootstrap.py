@@ -9,7 +9,7 @@ What it does
 
 What it does NOT do
 -------------------
-- Download data (call `tswift.fetch(project_dir, program)` for that — keeps bootstrap
+- Download data (call `tswift.fetch(project_dir, program_id)` for that — keeps bootstrap
   fast and offline-safe).
 - Guess the instrument mode (this requires knowing which observation, which the user
   chooses when fetching). Mode is set in config.yaml after fetch.
@@ -17,6 +17,7 @@ What it does NOT do
 from __future__ import annotations
 
 import logging
+import os
 import textwrap
 from pathlib import Path
 from typing import Optional
@@ -51,8 +52,8 @@ instrument:
   mode: null          # "SOSS" | "G395H" | "PRISM" | "MIRI_LRS" — set after `tswift fetch` confirms the obs
 
 paths:
-  crds_cache: "~/crds_cache/"
-  ld_data: "/Users/guangweifu/Documents/Work/exotic_ld_data"
+  crds_cache: "{crds_cache}"   # CRDS reference-file cache (first run downloads several GB)
+  ld_data: "{ld_data}"         # exotic_ld stellar-grid data dir — REQUIRED for spectral fits
 
 extraction:
   bad_pixel:
@@ -117,8 +118,19 @@ def bootstrap(
 
     config_path = outdir / "config.yaml"
     if not config_path.exists():
-        config_path.write_text(_CONFIG_TEMPLATE.format(planet_name=planet))
+        # Fill machine paths from the environment when available so a fresh
+        # checkout doesn't inherit someone else's hardcoded directories.
+        ld_data = os.environ.get("EXOTIC_LD_DATA") or "CHANGE_ME-path-to-exotic_ld_data"
+        crds_cache = os.environ.get("CRDS_PATH") or "~/crds_cache/"
+        config_path.write_text(_CONFIG_TEMPLATE.format(
+            planet_name=planet, ld_data=ld_data, crds_cache=crds_cache))
         logger.info(f"Wrote {config_path}")
+        if ld_data.startswith("CHANGE_ME"):
+            logger.warning(
+                "Set paths.ld_data in %s to your exotic_ld data dir "
+                "(or export EXOTIC_LD_DATA) before running spectral fits.",
+                config_path,
+            )
     else:
         logger.info(f"Kept existing {config_path}")
 
@@ -133,7 +145,8 @@ def bootstrap(
 
             ```python
             from tswift import fetch
-            fetch("{outdir.name}", program="{program}")
+            # narrow with target_name=... and instrument=... once you see the obs list
+            fetch("{outdir.name}", program_id="{program}")
             ```
 
             - `target.json` holds system parameters from NASA Exoplanet Archive.

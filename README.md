@@ -37,13 +37,38 @@ export CRDS_PATH=$HOME/crds_cache
 export CRDS_SERVER_URL=https://jwst-crds.stsci.edu
 ```
 
+Download the **exotic_ld stellar-grid data** (a few GB, separate from the
+`pip install exotic-ld` code) from the exotic_ld data release, unpack it, and
+point the pipeline at it — either set `paths.ld_data` in each project's
+`config.yaml`, or export it once so new projects pick it up automatically:
+
+```bash
+export EXOTIC_LD_DATA=$HOME/exotic_ld_data
+```
+
+`bootstrap` reads `$EXOTIC_LD_DATA` and `$CRDS_PATH` when generating a project's
+config, so set them before bootstrapping. The optional limb-asymmetry stage needs
+`catwoman` — install it with `pip install 'tswift[limb]'`.
+
 For proprietary MAST downloads, save a token at `~/.mast_token` (owner-only,
 `chmod 600`). `tswift.fetch()` reads it automatically.
 
 ## Quickstart
 
 Read [RUNBOOK.md](RUNBOOK.md) — it walks through every pipeline stage with
-the exact Python call, sanity checks, and failure modes.
+the exact Python call, sanity checks, and failure modes. A complete runnable
+driver template lives in [examples/](examples/).
+
+Project setup (bootstrap + MAST) is also available as a CLI:
+
+```bash
+tswift bootstrap "WASP-69 b" 5924 --outdir "./WASP-69 b"
+tswift list 5924 --target WASP-69 --instrument NIRISS   # inspect obs (no download)
+tswift fetch "./WASP-69 b" 5924 --target WASP-69 --instrument NIRISS
+```
+
+The iterative analysis stages stay in Python (you inspect each diagnostic PNG
+before continuing):
 
 ```python
 from tswift import bootstrap, fetch

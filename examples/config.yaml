@@ -1,0 +1,35 @@
+# Sample config.yaml — copy into your project dir and edit.
+#
+# System params (Teff, period, Rp/Rs, a/Rs, inclination, ...) live in target.json
+# and are auto-populated by `tswift bootstrap`. Everything below is pipeline knobs.
+
+instrument:
+  mode: "SOSS"          # "SOSS" | "G395H" | "PRISM" | "MIRI_LRS"
+
+paths:
+  crds_cache: "~/crds_cache/"                 # or export CRDS_PATH
+  ld_data: "/path/to/exotic_ld_data"          # REQUIRED for spectral fits; or export EXOTIC_LD_DATA
+
+extraction:
+  bad_pixel:
+    n_sigma: 5.0          # MAD-based (pitfall #6 — never absolute-ADU thresholds)
+    min_sigma: 2.0
+    replace_with_nan: true
+  trace_half_width: 22    # SOSS ~22; G395H ~16. Aperture optimizer narrows within this.
+  trace_poly_order: 5     # PRISM 0, G395H 3, SOSS 5 (match the trace curvature)
+  aperture_criterion: "per_channel"   # SOSS: per_channel; NIRSpec: wl_rms
+  wavelength_left: 50     # LC/spec column window (G395H NRS1: 650)
+  wavelength_right: 2040
+  # restrict_trace_fit_to_window: true   # G395H NRS1 only — exclude the dark block
+  outlier_window: 20
+  outlier_threshold: 4.0
+
+mcmc:
+  nwalkers: 48            # joint G395H fit wants more (64) + nsteps 10000 / nburn 4000
+  nsteps: 8000
+  nburn: 3000
+  fit_ld1: false         # fix LD1 at the exotic_ld mean, fit only LD2 (pitfall #21)
+
+combine:
+  bin_widths_nm: [10, 20, 50]
+  bad_wavelengths: []    # microns to mask from the combined spectrum
