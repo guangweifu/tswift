@@ -93,8 +93,11 @@ def stage_badpix(ctx: dict) -> None:
     for det in DETECTORS:
         product = _pdir(ctx, det)
         data = np.load(product / "all_frame.npy")
-        data_fixed, _, _ = ts.mad_clip(data, n_sigma=bp["n_sigma"], min_sigma=bp["min_sigma"])
+        data_fixed, bad_mask, sigma = ts.mad_clip(
+            data, n_sigma=bp["n_sigma"], min_sigma=bp["min_sigma"])
         np.save(product / "data_fixed.npy", data_fixed)
+        ts.plot_bad_pixel(data, data_fixed, bad_mask, sigma, product / "figure",
+                          n_sigma=bp["n_sigma"], detector=det)
 
 
 def stage_extract(ctx: dict) -> None:
@@ -102,8 +105,9 @@ def stage_extract(ctx: dict) -> None:
     for det in DETECTORS:
         product = _pdir(ctx, det)
         wl_left, wl_right = _window(ctx, det)
+        data_fixed = np.load(product / "data_fixed.npy")
         result = ts.run_extract(
-            np.load(product / "data_fixed.npy"), mode=MODE, detector=det,
+            data_fixed, mode=MODE, detector=det,
             trace_half_width=ex.get("trace_half_width", 16),
             trace_poly_order=ex.get("trace_poly_order", 3),
             aperture_criterion=ex.get("aperture_criterion", "wl_rms"),
@@ -115,6 +119,19 @@ def stage_extract(ctx: dict) -> None:
         ts.save_extract_outputs(result, product)
         json.dump({"aperture": list(result["aperture"])},
                   open(product / "aperture.json", "w"), indent=2)
+        # Diagnostics — inspect these before the WL fit.
+        time_all = np.load(product / "time_all.npy")
+        time_hr = (time_all - time_all[0]) * 24.0
+        up, down = result["aperture"]
+        figdir = product / "figure"
+        ts.plot_trace(data_fixed, result["trace_fit"],
+                      ex.get("trace_half_width", 16), figdir, detector=det)
+        ts.plot_aperture_scan(result["extract_2D"], result["all_aperture_results"],
+                              up, down, result["oot_mask"], result["ingress_idx"],
+                              time_hr, wl_left, wl_right, figdir, detector=det)
+        cl_before = np.nansum(result["extract_2D"][:, up:down, :], axis=1)
+        ts.plot_clean(cl_before, result["clean_2D"], time_hr, wl_left, wl_right,
+                      figdir, detector=det)
 
 
 def stage_wl(ctx: dict) -> None:
@@ -193,6 +210,32 @@ def stage_spec(ctx: dict) -> None:
         ts.plot_spec_fit(sr, wvl, u1, u2, outdir=product / "figure", detector=det)
 
 
+def stage_bad_col_repair(ctx: dict) -> None:
+    """Repair stable hot-pixel channels per detector (G395H has no He line to protect)."""
+    orb = ctx["target"]["orbital"]
+    g = json.loads((ctx["project"] / "joint" / "wl_geometry.json").read_text())["shared"]
+    for det in DETECTORS:
+        product = _pdir(ctx, det)
+        ap = json.loads((product / "aperture.json").read_text())
+        time_all = np.load(product / "time_all.npy")
+        time_hr = (time_all - time_all[0]) * 24.0
+        wvl = np.load(product / ts.wvl_filename(MODE, det))
+        rep = ts.repair_outlier_columns(
+            np.load(product / "clean_2D.npy"), np.load(product / "data_fixed.npy"),
+            np.load(product / "trace_fit.npy"), np.load(product / "oot_mask.npy"),
+            wvl, time_hr, np.load(product / "spec_fit.npy"),
+            np.load(product / "spec_fit_err.npy"),
+            np.load(product / "u1_per_wvl.npy"), np.load(product / "u2_per_wvl.npy"),
+            geom=g, period_days=orb["period_days"], aperture=tuple(ap["aperture"]),
+            trace_half_width=ctx["cfg"]["extraction"].get("trace_half_width", 16),
+            protected_wvl_um=[])     # G395H: no He I 1083 nm line in band
+        np.save(product / "clean_2D.npy", rep.clean_2D_repaired)
+        np.save(product / "spec_fit.npy", rep.spec_fit_repaired)
+        np.save(product / "spec_fit_err.npy", rep.spec_err_repaired)
+        ts.plot_repair_diagnostics(rep, wvl, outdir=product / "figure",
+                                   planet_name=ctx["target"]["name"], detector=det)
+
+
 def stage_combine_dets(ctx: dict) -> None:
     """Inverse-variance stitch of NRS1 + NRS2 into the public G395H spectrum."""
     dets = {}
@@ -238,10 +281,11 @@ def stage_red_noise(ctx: dict) -> None:
 
 STAGES = {
     "calibrate": stage_calibrate, "badpix": stage_badpix, "extract": stage_extract,
-    "wl": stage_wl, "spec": stage_spec, "combine_dets": stage_combine_dets,
-    "red_noise": stage_red_noise,
+    "wl": stage_wl, "spec": stage_spec, "bad_col_repair": stage_bad_col_repair,
+    "combine_dets": stage_combine_dets, "red_noise": stage_red_noise,
 }
-ALL = ["calibrate", "badpix", "extract", "wl", "spec", "combine_dets", "red_noise"]
+ALL = ["calibrate", "badpix", "extract", "wl", "spec", "bad_col_repair",
+       "combine_dets", "red_noise"]
 
 
 def main(argv=None) -> int:

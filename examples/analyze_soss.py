@@ -57,10 +57,12 @@ def stage_badpix(ctx: dict) -> None:
     product = ctx["product"]
     bp = ctx["cfg"]["extraction"]["bad_pixel"]
     data = np.load(product / "all_frame.npy")
-    data_fixed, _, sigma = ts.mad_clip(
+    data_fixed, bad_mask, sigma = ts.mad_clip(
         data, n_sigma=bp["n_sigma"], min_sigma=bp["min_sigma"])
     np.save(product / "data_fixed.npy", data_fixed)
     np.save(product / "sigma_pix.npy", sigma)
+    ts.plot_bad_pixel(data, data_fixed, bad_mask, sigma, product / "figure",
+                      n_sigma=bp["n_sigma"], detector=DETECTOR)
 
 
 def stage_extract(ctx: dict) -> None:
@@ -81,6 +83,20 @@ def stage_extract(ctx: dict) -> None:
     json.dump({"aperture": list(result["aperture"]),
                "ingress_idx": int(result["ingress_idx"])},
               open(product / "aperture.json", "w"), indent=2)
+    # Diagnostics — inspect these before the WL fit.
+    time_all = np.load(product / "time_all.npy")
+    time_hr = (time_all - time_all[0]) * 24.0
+    up, down = result["aperture"]
+    wl_left = ex.get("wavelength_left", 50); wl_right = ex.get("wavelength_right", 2040)
+    figdir = product / "figure"
+    ts.plot_trace(data_fixed, result["trace_fit"],
+                  ex.get("trace_half_width", 22), figdir, detector=DETECTOR)
+    ts.plot_aperture_scan(result["extract_2D"], result["all_aperture_results"],
+                          up, down, result["oot_mask"], result["ingress_idx"],
+                          time_hr, wl_left, wl_right, figdir, detector=DETECTOR)
+    cl_before = np.nansum(result["extract_2D"][:, up:down, :], axis=1)
+    ts.plot_clean(cl_before, result["clean_2D"], time_hr, wl_left, wl_right,
+                  figdir, detector=DETECTOR)
 
 
 def _wl_band_ld(ctx, wvl, wl_left, wl_right):

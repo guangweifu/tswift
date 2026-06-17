@@ -83,6 +83,15 @@ from tswift.combine import (
     combine_detectors,
 )
 from tswift.spectrum import plot_spectrum, save_spectrum
+from tswift.eclipse import (
+    fit_eclipse_wl,
+    plot_eclipse_wl,
+    fit_eclipse_curves,
+    combine_emission,
+    save_emission_spectrum,
+    plot_emission_spectrum,
+    ECLIPSE_PARAM_ORDER,
+)
 
 __version__ = "2.0.0.dev0"
 
@@ -160,5 +169,12 @@ __all__ = [
     "combine_detectors",
     "plot_spectrum",
     "save_spectrum",
+    "fit_eclipse_wl",
+    "plot_eclipse_wl",
+    "fit_eclipse_curves",
+    "combine_emission",
+    "save_emission_spectrum",
+    "plot_emission_spectrum",
+    "ECLIPSE_PARAM_ORDER",
     "__version__",
 ]
