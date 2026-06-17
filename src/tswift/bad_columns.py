@@ -20,7 +20,7 @@ This module:
 3. **Repairs** by re-extracting the column light curve with those
    pixels masked, then re-fitting the transit depth with the same
    geometry as ``fit_spec_curves`` (a, inc, t0_offset fixed; per-bin
-   slope, rp, LD2, constant free).  LD1 is fixed at the per-channel
+   slope, rp, constant, LD2 free).  LD1 is fixed at the per-channel
    exotic_ld value.
 4. **Falls back to column masking** when repair doesn't bring the
    depth within ``post_repair_n_sigma`` of the local median (e.g. a
@@ -34,7 +34,7 @@ Use as a stage AFTER ``spec``:
     repair = repair_outlier_columns(
         clean_2D, data_fixed, trace_fit, oot_mask,
         wvl, time_hr, spec_fit, spec_err, u1_per_wvl, u2_per_wvl,
-        wl_best_params={"a": ..., "inc": ..., "t0_offset": ...},
+        geom={"a": ..., "inc": ..., "t0_offset": ...},
         period_days=..., aperture=(up, down), trace_half_width=22,
         protected_wvl_um=[1.0833],     # always protect He
     )
@@ -229,11 +229,14 @@ def _fit_one_column(
     u2: float,
     rp_init: float,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Single-column curve_fit with `[slope, rp, LD2, constant]` free.
+    """Single-column curve_fit with `[slope, rp, constant, LD2]` free.
+
+    Column order matches ``fit_spec_curves`` exactly so the repaired params can
+    be written straight back into spec_fit.npy and read by red_noise.
 
     Returns
     -------
-    popt : (4,)  best-fit params [slope, rp, LD2, constant]
+    popt : (4,)  best-fit params [slope, rp, constant, LD2]
     perr : (4,)  1σ from cov
     rms  : float  residual RMS
     """
@@ -260,7 +263,7 @@ def _fit_one_column(
 
     t_ref = float(np.median(time_hr))
 
-    def model_lc(_t, slope, rp_, LD2_, const_):
+    def model_lc(_t, slope, rp_, const_, LD2_):
         p = batman.TransitParams()
         p.t0 = geom["t0_offset"] / period_hr; p.per = 1.0
         p.rp = rp_; p.a = geom["a"]; p.inc = geom["inc"]
@@ -271,7 +274,7 @@ def _fit_one_column(
         return (flux / norm) * const_ + slope * (time_hr - t_ref)
 
     err = np.full(int(valid.sum()), float(np.nanstd(lc_n[oot_mask & valid])))
-    p0_init = [0.0, rp_init, u2, 1.0]
+    p0_init = [0.0, rp_init, 1.0, u2]
     try:
         popt, pcov = curve_fit(
             lambda t, *theta: model_lc(t, *theta)[valid],
@@ -333,7 +336,7 @@ def repair_outlier_columns(
     time_hr : (n_frames,) hours
     spec_fit, spec_err : (n_cols, 4)
         Per-channel curve_fit results from `fit_spec_curves`.  Columns:
-        slope, rp, LD2, constant.
+        slope, rp, constant, LD2.
     u1_per_wvl, u2_per_wvl : (n_cols,) limb-darkening per column
     geom : dict  fixed orbital geometry
     aperture : (lo, hi) cutout-row range used by `run_extract`

@@ -131,6 +131,7 @@ def find_trace(
     outlier_clip: float = 4.0,
     centering: str | None = None,
     centroid_half: int = 10,
+    fit_window: tuple[int, int] | None = None,
 ) -> np.ndarray:
     """Per-column trace row + robust polynomial smoothing.
 
@@ -156,6 +157,9 @@ def find_trace(
         Time-median of the 2D cube after bad-pixel fixing.
     mode : {"SOSS", "G395H", "PRISM", "MIRI_LRS"}
     detector : "nis" | "nrs1" | "nrs2" | "mirimage" | None
+        Currently unused by the trace logic — reserved for future per-detector
+        handling (e.g. MIRI detector-defect masking). Kept so callers can pass
+        it without a signature change later.
     poly_order : int
         Polynomial order for the final smoothing fit. SOSS needs ≥5;
         NIRSpec 3 is fine.
@@ -169,6 +173,17 @@ def find_trace(
         Empirically `10` worked best on WASP-94 A b SOSS — wider pulls in
         background, narrower under-resolves the double peak.  Only used
         when `centering="centroid"`.
+    fit_window : (int, int) or None
+        Half-open column range ``[lo, hi)`` of *illuminated* columns the
+        polynomial is allowed to use.  Columns outside it (e.g. the dark
+        left ~650 columns of G395H NRS1, or the 8 reference columns at the
+        right edge) carry no real trace — their per-column centroids are
+        argmax-of-noise and, because they can span a large contiguous block,
+        the Pass-3 outlier clip cannot reject them, so they drag the global
+        low-order fit.  When given, only in-window columns constrain the
+        provisional + final fits; outside the window the returned trace is
+        clamped to the nearest in-window edge value (no wild extrapolation).
+        ``None`` (default) uses every finite column — prior behaviour.
 
     Returns
     -------
@@ -238,6 +253,20 @@ def find_trace(
     # "outliers", and the surviving cols then extrapolate a wrong shape).
     trace_clean = trace_y.copy()
     x = np.arange(n_cols)
+
+    # Restrict the fit to the illuminated columns.  Dark columns produce
+    # argmax-of-noise centroids; when they form a large contiguous block
+    # (e.g. cols 0-650 on G395H NRS1) the Pass-3 clip below can't reject
+    # them and they bias the global low-order polynomial.
+    if fit_window is not None:
+        lo_w, hi_w = int(fit_window[0]), int(fit_window[1])
+        lo_w = max(0, lo_w)
+        hi_w = n_cols if hi_w is None else min(n_cols, hi_w)
+        trace_clean[:lo_w] = np.nan
+        trace_clean[hi_w:] = np.nan
+    else:
+        lo_w, hi_w = 0, n_cols
+
     valid0 = np.isfinite(trace_clean)
     if valid0.sum() > poly_order + 1:
         # `min(poly_order, 5)` keeps the provisional fit numerically stable
@@ -250,10 +279,25 @@ def find_trace(
     valid = np.isfinite(trace_clean)
     if valid.sum() < poly_order + 1:
         logger.warning("Not enough valid trace centroids; using median row.")
-        return np.full(n_cols, np.nanmedian(trace_clean))
+        finite_rows = trace_clean[valid]
+        if finite_rows.size:
+            med = float(np.median(finite_rows))
+        else:
+            # Blank/faint detector: no valid centroids anywhere. Fall back to the
+            # geometric center row so downstream mask builders get a finite,
+            # sane constant trace instead of NaN (which crashes int() casts).
+            med = (n_rows - 1) / 2.0
+        return np.full(n_cols, med)
 
     coeffs = np.polyfit(x[valid], trace_clean[valid], poly_order)
     trace_fit = np.polyval(coeffs, x)
+
+    # Outside the illuminated window the polynomial is unconstrained and can
+    # extrapolate wildly; clamp to the nearest in-window edge value so the
+    # (science-excluded) dark columns get a sane constant row instead.
+    if fit_window is not None:
+        trace_fit[:lo_w] = trace_fit[lo_w]
+        trace_fit[hi_w:] = trace_fit[hi_w - 1]
     return trace_fit
 
 
@@ -393,6 +437,7 @@ def run_extract(
     aperture_criterion: ApertureCriterion = "per_channel",
     wavelength_left: int = 0,
     wavelength_right: int | None = None,
+    restrict_trace_fit_to_window: bool = False,
     outlier_window: int = 20,
     outlier_threshold: float = 4.0,
 ) -> dict:
@@ -402,8 +447,19 @@ def run_extract(
     ----------
     data_all : (n_frames, n_rows, n_cols)
         Input cube. Usually the output of `bad_pixel.mad_clip`.
-    mode : {"SOSS", "G395H", "PRISM"}
+    mode : {"SOSS", "G395H"}
+        SOSS and G395H are supported here.  PRISM (row-slicing) and MIRI LRS
+        (row-dispersed, ``bg_axis='row'``) use a different extraction geometry
+        and are not yet ported through ``run_extract`` — they raise
+        ``NotImplementedError``.  ``run_calibrate`` does support MIRI LRS.
     detector : "nis" | "nrs1" | "nrs2" | None
+    restrict_trace_fit_to_window : bool
+        If True, the trace polynomial is fit only over ``[wavelength_left,
+        wavelength_right)`` (dark columns outside are excluded and the trace is
+        clamped to the edge value).  Use for detectors with a large dark block
+        that biases the global fit (G395H NRS1 cols 0-650).  Default False
+        reproduces the historical trace exactly — this knob CHANGES the trace,
+        so existing reductions are unaffected unless they opt in.
 
     Returns
     -------
@@ -411,22 +467,41 @@ def run_extract(
         trace_fit, extract_2D, clean_2D, aperture=(up, down), oot_mask, ingress_idx,
         all_aperture_results
     """
-    if mode not in ("SOSS", "G395H", "PRISM"):
-        raise ValueError(f"unknown mode {mode!r}")
     if mode == "PRISM":
         raise NotImplementedError(
             "PRISM mode uses row slicing, not polynomial trace finding. "
             "Will be ported separately."
         )
+    if mode in ("MIRI", "MIRILRS", "MIRI_LRS"):
+        raise NotImplementedError(
+            "MIRI LRS extraction is not yet ported through run_extract: it is "
+            "row-dispersed (wavelength along rows, bg_axis='row'), so the "
+            "column-oriented trace + aperture logic here does not apply. "
+            "run_calibrate() supports MIRI LRS; extract it separately for now."
+        )
+    if mode not in ("SOSS", "G395H"):
+        raise ValueError(f"unknown mode {mode!r}")
 
     median = np.nanmedian(data_all, axis=0)
-    logger.info(f"Finding trace (mode={mode}, detector={detector}, poly_order={trace_poly_order})")
+    n_cols = median.shape[1]
+    wl_right_eff = n_cols if wavelength_right is None else min(n_cols, wavelength_right)
+    # Opt-in only: restrict the trace polyfit to the illuminated window.  This
+    # is a genuine improvement where a large contiguous dark block (e.g. G395H
+    # NRS1 cols 0-650) biases the global low-order fit, but it CHANGES the trace
+    # vs prior reductions, so it must be requested explicitly — `wavelength_left/
+    # right` historically governed only the LC window, not the trace polyfit.
+    fit_window = (max(0, wavelength_left), wl_right_eff) if restrict_trace_fit_to_window else None
+    logger.info(
+        f"Finding trace (mode={mode}, detector={detector}, poly_order={trace_poly_order}"
+        + (f", fit restricted to cols [{fit_window[0]}, {fit_window[1]}))" if fit_window else ")")
+    )
     trace_fit = find_trace(
         median,
         mode=mode,
         detector=detector,
         poly_order=trace_poly_order,
         outlier_clip=trace_outlier_clip,
+        fit_window=fit_window,
     )
     logger.info(
         f"Trace median row {np.nanmedian(trace_fit):.1f}, "
@@ -458,6 +533,63 @@ def run_extract(
         "ingress_idx": int(ingress_idx),
         "all_aperture_results": opt_results,
     }
+
+
+def measure_trace_position(
+    extract_2D: np.ndarray,
+    clean_2D: np.ndarray,
+    oot_mask: np.ndarray,
+    aperture: tuple[int, int],
+    wavelength_left: int,
+    wavelength_right: int,
+) -> np.ndarray:
+    """Per-integration trace-position drift, for pointing-systematics decorrelation.
+
+    Returns an (n_frames, 2) array of OOT-referenced drift vectors:
+
+      * column 0 — **y-drift** (cross-dispersion / spatial), the aperture-
+        weighted spatial centroid of the rectified ``extract_2D`` cube over the
+        science columns, minus its OOT median.  Units: detector rows.
+      * column 1 — **x-shift** (dispersion), a linearized least-squares shift of
+        each integration's 1D spectrum against the OOT-median spectrum
+        (``dx = Σ Δs·s' / Σ s'²``), minus its OOT median.  Units: columns.
+
+    On JWST BOTS these sub-pixel drifts modulate the captured flux at the
+    aperture edge and are the usual driver of white-light red noise; feed the
+    output to ``fit_wl_mcmc_joint(detrend_vectors=...)`` / ``fit_spec_curves``.
+    """
+    up, down = int(aperture[0]), int(aperture[1])
+    wl_left = max(0, wavelength_left)
+    wl_right = clean_2D.shape[1] if wavelength_right is None else wavelength_right
+    oot_mask = np.asarray(oot_mask, dtype=bool)
+
+    # y-drift: spatial centroid of the rectified cube over science columns.
+    sub = extract_2D[:, up:down, wl_left:wl_right]            # (n, ap_h, ncol)
+    prof = np.nansum(sub, axis=2)                            # (n, ap_h)
+    prof = np.where(prof > 0, prof, 0.0)
+    rows = np.arange(up, down, dtype=float)
+    tot = np.nansum(prof, axis=1)
+    ycen = np.nansum(prof * rows[None, :], axis=1) / np.where(tot > 0, tot, np.nan)
+    y_drift = ycen - np.nanmedian(ycen[oot_mask])
+
+    # x-shift: linearized LSQ of each spectrum vs the OOT-median spectrum.
+    spec = clean_2D[:, wl_left:wl_right].astype(float)       # (n, ncol)
+    spec_med = np.nanmedian(spec[oot_mask], axis=0)
+    sprime = np.gradient(spec_med)
+    good = np.isfinite(spec_med) & np.isfinite(sprime)
+    denom = np.nansum(sprime[good] ** 2)
+    if denom > 0:
+        dx = np.array([
+            np.nansum((spec[i] - spec_med)[good] * sprime[good]) / denom
+            for i in range(spec.shape[0])
+        ])
+    else:
+        dx = np.zeros(spec.shape[0])
+    x_shift = dx - np.nanmedian(dx[oot_mask])
+
+    out = np.column_stack([y_drift, x_shift])
+    out[~np.isfinite(out)] = 0.0      # neutral for a linear regressor
+    return out
 
 
 def save_extract_outputs(result: dict, out_dir: Path) -> None:

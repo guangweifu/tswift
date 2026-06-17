@@ -7,13 +7,13 @@ four calibration stages the rest of tswift expects:
    including) jump detection and ramp fitting.  Produces per-group
    calibrated 4-D ramps.
 2. **Group-level background subtraction** (`calibrate_bg_subtract`) —
-   mode-dispatched mask (edge-rows / percentile PSF / SOSS count
+   mode-dispatched mask (edge-rows / PSF-centroid / SOSS count
    threshold / MIRI per-row off-cols) then per-group median subtraction.
 3. **Ramp fit** (`calibrate_rampfit`) — JumpStep + RampFitStep with the
    BOTS-friendly `expand_large_events=False` default.
 4. **Stage 2 wavelength** (`calibrate_wvl`) — NIRSpec `extract_2d_step`,
-   NIRISS `assign_wcs` along trace, or MIRI `extract_1d_step` depending
-   on mode.
+   NIRISS `assign_wcs` along the trace, or MIRI `assign_wcs` evaluated
+   along the per-row trace centroid, depending on mode.
 
 A final helper (`build_frame_time`) concatenates the per-segment ramp
 FITS into the `all_frame.npy` + `time_all.npy` that the analysis layer
@@ -55,7 +55,6 @@ _MODE_DETECTORS = {
     "PRISM": _NIRSPEC_DETECTORS,
     "G395H": _NIRSPEC_DETECTORS,
     "SOSS":  _SOSS_DETECTORS,
-    "MIRI":  _MIRI_DETECTORS,
     "MIRI_LRS": _MIRI_DETECTORS,
 }
 
@@ -137,7 +136,7 @@ def _validate_mode(mode: str) -> str:
     mode = mode.upper()
     if mode in _MODE_DETECTORS:
         return mode
-    if mode == "MIRILRS" or mode == "MIRI_LRS":
+    if mode in ("MIRI", "MIRILRS", "MIRI_LRS"):
         return "MIRI_LRS"
     raise ValueError(
         f"Unknown instrument mode {mode!r}. Supported: PRISM, G395H, SOSS, MIRI_LRS"
@@ -570,7 +569,12 @@ def calibrate_bg_subtract(
                 col_mask = result["mask"]  # 1-D bool
                 for ii in range(n_ints):
                     for gg in range(n_grp):
-                        bg_row = np.nanmedian(data[ii, gg, :, col_mask], axis=1)
+                        # Index columns in a separate step: mixing a slice (`:`)
+                        # with a boolean array in one index expression triggers
+                        # numpy advanced indexing, which moves the masked axis to
+                        # the front (giving (n_sel_cols, n_rows)) and breaks the
+                        # per-row subtraction below.
+                        bg_row = np.nanmedian(data[ii, gg][:, col_mask], axis=1)
                         cleaned[ii, gg] = (data[ii, gg] - bg_row[:, None]).astype(np.float32)
 
             hdul["SCI"].data = cleaned
@@ -797,7 +801,8 @@ def _stage2_wvl_miri(
     stage2_dir: Path,
     crds_cache: Optional[str] = None,
 ) -> np.ndarray:
-    """MIRI LRS: AssignWcs → Extract1d to get the per-row wavelength grid."""
+    """MIRI LRS: AssignWcs, then evaluate the WCS along the per-row trace
+    centroid to get the per-row wavelength grid (no Extract1d step)."""
     from jwst.pipeline import calwebb_spec2
 
     ramp_file = ramp_files[0]

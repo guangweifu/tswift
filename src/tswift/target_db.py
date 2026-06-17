@@ -149,9 +149,13 @@ def query_target(planet_name: str, program: Optional[str] = None) -> Target:
             period_err_days=_f("pl_orbpererr1"),
             t0_bjd_tdb=_f("pl_tranmid"),
             t0_err_days=_f("pl_tranmiderr1"),
-            a_over_rs=_f("pl_ratdor"),
+            # a/Rs and inclination are the WL-fit initial guesses; a null value
+            # here would coerce to NaN in the MCMC initial vector and silently
+            # wreck the fit several stages later, so require them at query time
+            # (override manually in target.json for systems the archive lacks).
+            a_over_rs=_req("pl_ratdor", "a/Rs"),
             a_over_rs_err=_f("pl_ratdorerr1"),
-            inclination_deg=_f("pl_orbincl"),
+            inclination_deg=_req("pl_orbincl", "inclination"),
             inclination_deg_err=_f("pl_orbinclerr1"),
             eccentricity=_f("pl_orbeccen") or 0.0,
         ),

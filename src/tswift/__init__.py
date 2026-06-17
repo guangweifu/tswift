@@ -5,10 +5,6 @@ from tswift.contracts import (
     OrbitalParams,
     PlanetParams,
     Coordinates,
-    Manifest,
-    Diagnostics,
-    CheckResult,
-    FileRef,
 )
 from tswift.bootstrap import bootstrap
 from tswift.mast import fetch, list_program_products, ensure_mast_login, load_mast_token
@@ -38,6 +34,7 @@ from tswift.extract import (
     optimize_aperture,
     clean_per_channel,
     run_extract,
+    measure_trace_position,
     save_extract_outputs,
     plot_trace,
     plot_aperture_scan,
@@ -95,10 +92,6 @@ __all__ = [
     "OrbitalParams",
     "PlanetParams",
     "Coordinates",
-    "Manifest",
-    "Diagnostics",
-    "CheckResult",
-    "FileRef",
     "bootstrap",
     "fetch",
     "list_program_products",
@@ -128,6 +121,7 @@ __all__ = [
     "optimize_aperture",
     "clean_per_channel",
     "run_extract",
+    "measure_trace_position",
     "save_extract_outputs",
     "plot_trace",
     "plot_aperture_scan",

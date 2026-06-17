@@ -7,11 +7,14 @@ and only the depth + limb-darkening vary with color — standard assumption for
 spectroscopic transit fits.
 
 Limb-darkening coefficients come from exotic_ld per wavelength. At grid edges exotic_ld
-raises; we fill those with nearest-neighbor values from successfully computed
-wavelengths rather than a global fallback. The old fallback of (u1=0.5, u2=0.1) biased
-rp by ~300 ppm at the blue end of NRS1 — see comment in legacy step 7.
+raises; we fill those with the nearest successfully-computed neighbor rather than a
+global fallback. Note this is a flat nearest-neighbor *hold* across a contiguous edge
+gap (the same single edge value is held across the whole missing block), not a smooth
+interpolation. The old global fallback of (u1=0.5, u2=0.1) biased rp by ~300 ppm at the
+blue end of NRS1 (pitfall #20); if a large fraction of a band is filled the LD model is
+likely wrong for the star — try `ld_model="phoenix"`.
 
-`fix_ld2_stagger`: if True, drops LD2 from the fit (uses exotic_ld's u2 per wavelength).
+`fix_ld2`: if True, drops LD2 from the fit (uses exotic_ld's u2 per wavelength).
 Eliminates the rp–LD2 degeneracy that can produce inverted features when LD2 hits the
 ±0.5 bound; recommended for SOSS. Default False for backward-compat.
 """
@@ -114,11 +117,12 @@ def fit_spec_curves(
     bounds_upper: tuple = (0.005, 0.15, 1.005, 0.5),
     fix_ld2: bool = False,
     mask_indices: Optional[np.ndarray] = None,
+    detrend_vectors: Optional[np.ndarray] = None,
+    oot_mask: Optional[np.ndarray] = None,
 ) -> dict:
     """Fit a transit depth at every wavelength column.
 
-    Parameters follow the legacy step 7 convention. The returned dict mirrors the
-    legacy output files:
+    The returned dict carries:
 
     - `fit`        : (n_wvl, 4) → [slope, rp, constant, LD2]
     - `fit_err`    : (n_wvl, 4) → 1-σ uncertainties (0 for fixed LD2)
@@ -127,6 +131,14 @@ def fit_spec_curves(
 
     Every `wvl[i]` for i outside [left, right) gets all-NaN entries so downstream
     combine code can keep the indexing simple.
+
+    `oot_mask` : (n_frames,) bool, optional
+        OOT baseline used for the per-channel normalization median. If None
+        (default), falls back to ~15% of frames at each edge (pre+post). Callers
+        SHOULD pass the white-light-derived OOT mask so the normalization uses
+        the physically-correct OOT window; per CLAUDE.md pitfall #23/#33 a
+        pre-ingress-only mask avoids the post-transit-drift / He-tail bias that a
+        symmetric pre+post median introduces at the science pixel.
     """
     if clean_2D.ndim != 2:
         raise ValueError(f"expected clean_2D (n_frames, n_wvl), got {clean_2D.shape}")
@@ -135,12 +147,20 @@ def fit_spec_curves(
     if wavelength_left >= right:
         raise ValueError(f"bad wavelength window [{wavelength_left}, {right})")
 
-    # Per-channel OOT normalization.
-    n_edge = max(10, int(n_frames * 0.15))
-    oot_mask = np.zeros(n_frames, bool)
-    oot_mask[:n_edge] = True
-    oot_mask[-n_edge:] = True
-    oot_median = np.nanmedian(clean_2D[oot_mask, :], axis=0)[None, :]
+    # Per-channel OOT normalization.  Prefer the caller-supplied OOT mask (the
+    # white-light window); otherwise fall back to ~15% of frames at each edge.
+    if oot_mask is not None:
+        norm_mask = np.asarray(oot_mask, dtype=bool)
+        if norm_mask.shape[0] != n_frames:
+            raise ValueError(
+                f"oot_mask length {norm_mask.shape[0]} != n_frames {n_frames}"
+            )
+    else:
+        n_edge = max(10, int(n_frames * 0.15))
+        norm_mask = np.zeros(n_frames, bool)
+        norm_mask[:n_edge] = True
+        norm_mask[-n_edge:] = True
+    oot_median = np.nanmedian(clean_2D[norm_mask, :], axis=0)[None, :]
     cl_nor = clean_2D / oot_median
 
     # Mask bad integrations (applied before fit)
@@ -152,9 +172,26 @@ def fit_spec_curves(
     valid_frames = ~np.isnan(cl_nor[:, ref_col])
     x = time_hr[valid_frames]
     cl_fit = cl_nor[valid_frames]
+
+    # Optional linear decorrelation regressors (e.g. pointing-drift position
+    # vectors), subset to the same valid frames as the fitted light curves.
+    if detrend_vectors is not None:
+        dv_full = np.asarray(detrend_vectors, dtype=float)
+        if dv_full.ndim == 1:
+            dv_full = dv_full[:, None]
+        if dv_full.shape[0] != n_frames:
+            raise ValueError(
+                f"detrend_vectors first axis must be n_frames={n_frames}; "
+                f"got {dv_full.shape}"
+            )
+        dv_fit = dv_full[valid_frames]            # (n_valid, K)
+        n_detrend = dv_fit.shape[1]
+    else:
+        dv_fit = None
+        n_detrend = 0
     logger.info(
         f"Fitting {right - wavelength_left} wavelengths × {valid_frames.sum()} frames "
-        f"(fix_ld2={fix_ld2})"
+        f"(fix_ld2={fix_ld2}, n_detrend={n_detrend})"
     )
 
     # Transit model closure. a/inc/t0 are closed over.
@@ -176,9 +213,18 @@ def fit_spec_curves(
         lower = bounds_lower
         upper = bounds_upper
 
+    # Extend bounds for the detrend coefficients (generous; vectors are
+    # ~0.01-scale so true coeffs are ~0.05, nowhere near ±10).
+    if n_detrend:
+        lower_e = tuple(lower) + (-10.0,) * n_detrend
+        upper_e = tuple(upper) + (10.0,) * n_detrend
+        n_base = len(lower)
+        mid = [0.5 * (lo + hi) for lo, hi in zip(lower, upper)]   # feasible p0
+
     fit_arr = np.full((n_wvl, 4), np.nan)
     err_arr = np.full((n_wvl, 4), np.nan)
     rms_arr = np.full(n_wvl, np.nan)
+    detrend_arr = np.full((n_wvl, max(n_detrend, 1)), np.nan)
 
     for i in range(wavelength_left, right):
         lc = cl_fit[:, i]
@@ -186,7 +232,27 @@ def fit_spec_curves(
         if not np.isfinite(u1_i):
             continue
         try:
-            if fix_ld2:
+            if n_detrend:
+                # Model = transit×baseline + Σ coef_k · vec_k.
+                if fix_ld2:
+                    def mc(xx, s, r, c, *dc):
+                        return _model(xx, s, r, c, u2_i, u1_i) + dv_fit @ np.asarray(dc)
+                else:
+                    def mc(xx, s, r, c, l, *dc):
+                        return _model(xx, s, r, c, l, u1_i) + dv_fit @ np.asarray(dc)
+                p0 = list(mid) + [0.0] * n_detrend
+                popt, pcov = curve_fit(mc, x, lc, p0=p0,
+                                       bounds=(lower_e, upper_e), maxfev=10000)
+                perr = np.sqrt(np.diag(pcov))
+                if fix_ld2:
+                    fit_arr[i] = [popt[0], popt[1], popt[2], u2_i]
+                    err_arr[i] = [perr[0], perr[1], perr[2], 0.0]
+                else:
+                    fit_arr[i] = popt[:4]
+                    err_arr[i] = perr[:4]
+                detrend_arr[i] = popt[n_base:]
+                model = mc(x, *popt)
+            elif fix_ld2:
                 popt, pcov = curve_fit(
                     lambda xx, s, r, c: _model(xx, s, r, c, u2_i, u1_i),
                     x, lc, bounds=(lower, upper),
@@ -216,6 +282,7 @@ def fit_spec_curves(
         "fit": fit_arr,
         "fit_err": err_arr,
         "residuals_rms": rms_arr,
+        "detrend_coeffs": detrend_arr if n_detrend else None,
         "wavelength_left": wavelength_left,
         "wavelength_right": right,
     }
