@@ -17,9 +17,9 @@ intermediate products and figures in `WASP-69b/` are ground truth.
 
 Before starting any pipeline work:
 
-- [ ] Activate the env: `conda activate jwst_latest` (has jwst, batman, emcee, exotic_ld, astroquery).
-- [ ] Verify CRDS cache path: `echo $CRDS_PATH` (defaults to `~/crds_cache/`).
-- [ ] Verify LD data path exists: `/Users/guangweifu/Documents/Work/exotic_ld_data`.
+- [ ] Activate your env (has jwst, batman, emcee, exotic_ld, astroquery).
+- [ ] Verify the CRDS cache path: `echo $CRDS_PATH` (defaults to `~/crds_cache/`).
+- [ ] Verify the exotic_ld data dir: `echo $EXOTIC_LD_DATA` (or `paths.ld_data` in config.yaml).
 - [ ] Verify tswift is installed: `python -c "import tswift; print(tswift.__version__)"`.
 
 If any of these fail, stop and fix them — the pipeline can't recover from missing
