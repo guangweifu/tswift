@@ -26,6 +26,12 @@ dependencies = [
     "corner>=2.2",
 ]
 
+[project.scripts]
+tswift = "tswift.cli:main"
+
+[project.optional-dependencies]
+limb = ["catwoman>=1.0"]   # optional morning/evening limb-asymmetry stage
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
