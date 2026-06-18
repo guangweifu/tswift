@@ -24,9 +24,10 @@ dependencies = [
     "exotic-ld>=3.0",
     "emcee>=3.1",
     "corner>=2.2",
-    # batman-package imports `distutils`, which was removed from the stdlib in
-    # Python 3.12; setuptools vendors it, so a clean 3.12 env needs it explicitly.
-    "setuptools>=68",
+    # batman-package imports `distutils` and exotic_ld imports `pkg_resources` —
+    # both legacy modules vendored by setuptools. setuptools 81 removed
+    # pkg_resources, so cap below 81 (still provides distutils for batman on 3.12).
+    "setuptools>=68,<81",
 ]
 
 [project.scripts]

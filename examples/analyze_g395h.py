@@ -203,6 +203,7 @@ def stage_spec(ctx: dict) -> None:
             wavelength_left=wl_left, wavelength_right=wl_right,
             period_days=orb["period_days"], a_over_rs=shared["a"],
             inclination_deg=shared["inc"], t0_offset_hr=shared["t0_offset"],
+            ecc=orb.get("eccentricity", 0.0), omega=orb.get("omega_deg", 90.0),
             u1_arr=u1, u2_arr=u2, fix_ld2=False,
             oot_mask=np.load(product / "oot_mask.npy"))
         np.save(product / "spec_fit.npy", sr["fit"])

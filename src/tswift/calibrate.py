@@ -745,7 +745,6 @@ def _stage2_wvl_soss(
     logger.info("SOSS Stage 2 wvl from %s", ramp_file.name)
 
     output = calwebb_spec2.assign_wcs_step.AssignWcsStep.call(str(ramp_file), save_results=False)
-    wcs = output.meta.wcs
 
     with fits.open(ramp_file) as hdul:
         rate = np.asarray(hdul["SCI"].data, dtype=float)
@@ -775,19 +774,32 @@ def _stage2_wvl_soss(
     product_dir.mkdir(parents=True, exist_ok=True)
     np.save(product_dir / "soss_stage2_trace_fit.npy", trace_fit)
 
-    # Evaluate WCS(x, y, order=1) → (ra, dec, wavelength) in μm.
+    # Evaluate the order-1 WCS → (ra, dec, wavelength in μm) along the trace.
+    # jwst 2.0's generic `wcs(x, y, order)` call raises a units error for the
+    # NIRISS SOSS WCS; the supported idiom is `niriss_soss_set_input(model,
+    # order)`, which bakes in the spectral order and returns an (x, y) →
+    # (ra, dec, wavelength) WCS.
+    from jwst.assign_wcs.niriss import niriss_soss_set_input
+
+    wcs_order1 = niriss_soss_set_input(output, 1)
     cols = np.arange(n_cols, dtype=float)
     try:
-        _, _, lam = wcs(cols, trace_fit, np.ones_like(cols))
+        _, _, lam = wcs_order1(cols, trace_fit)
     except Exception as exc:
-        logger.warning("Vector WCS call failed (%s), falling back to per-column", exc)
+        logger.warning("Vector SOSS WCS call failed (%s), falling back to per-column", exc)
         lam = np.full(n_cols, np.nan)
         for c in range(n_cols):
             try:
-                _, _, lc = wcs(float(c), float(trace_fit[c]), 1)
+                _, _, lc = wcs_order1(float(c), float(trace_fit[c]))
                 lam[c] = lc
             except Exception:
                 pass
+    lam = np.asarray(lam, dtype=float)
+    if not np.any(np.isfinite(lam)):
+        raise RuntimeError(
+            "SOSS Stage 2: order-1 WCS produced no finite wavelengths — "
+            "check the jwst/gwcs version and the pastasoss reference file."
+        )
     logger.info(
         "SOSS wvl: %.3f–%.3f μm, trace rows %.1f–%.1f",
         float(np.nanmin(lam)), float(np.nanmax(lam)),

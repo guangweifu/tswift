@@ -131,6 +131,7 @@ def find_trace(
     outlier_clip: float = 4.0,
     centering: str | None = None,
     centroid_half: int = 10,
+    centroid_threshold_frac: float = 0.15,
     fit_window: tuple[int, int] | None = None,
 ) -> np.ndarray:
     """Per-column trace row + robust polynomial smoothing.
@@ -141,15 +142,22 @@ def find_trace(
       sub-pixel refinement.  Right for narrow, single-peaked PSFs (NIRSpec
       G395H, PRISM).  ~5× cheaper than centroid mode.
 
-    - `"centroid"` — argmax seed + flux-weighted centroid in a ±centroid_half-
-      row window around the seed.  Right for wide or multi-peaked PSFs
-      where argmax snaps to one of several lobes (NIRISS SOSS GR700XD has
-      a double-peaked spatial profile, MIRI LRS has detector-defect
-      sub-peaks).  Argmax can sit 5+ rows off the PSF center of mass on
-      SOSS — the centroid stays anchored to the bright core regardless.
+    - `"centroid"` — argmax seed + flux-weighted centroid in a *fixed*
+      ±centroid_half-row window around the seed.  (Legacy.)  On a strongly
+      asymmetric / double-peaked PSF the fixed window — centred on the
+      *brighter* lobe's argmax — may never reach the fainter lobe, biasing
+      the centre toward the bright lobe by several rows.
 
-    `centering=None` picks `"centroid"` for SOSS / MIRI_LRS and
-    `"argmax_parab"` everywhere else.
+    - `"centroid_threshold"` — argmax seed, then a flux-weighted centroid over
+      the *contiguous band* of rows whose smoothed flux exceeds
+      `centroid_threshold_frac × peak`, grown outward from the seed.  The band
+      auto-sizes to the actual PSF: it spans both GR700XD lobes (the inter-lobe
+      dip stays above threshold) and stops at the background gap before order 2,
+      so the centre lands on the true flux middle regardless of asymmetry or
+      which lobe argmax hit.  Right for NIRISS SOSS.
+
+    `centering=None` picks `"centroid_threshold"` for SOSS, `"centroid"` for
+    MIRI_LRS, and `"argmax_parab"` everywhere else.
 
     Parameters
     ----------
@@ -191,8 +199,13 @@ def find_trace(
         Polynomial trace center for every column (float).
     """
     if centering is None:
-        centering = "centroid" if mode in ("SOSS", "MIRI_LRS") else "argmax_parab"
-    if centering not in ("argmax_parab", "centroid"):
+        if mode == "SOSS":
+            centering = "centroid_threshold"
+        elif mode == "MIRI_LRS":
+            centering = "centroid"
+        else:
+            centering = "argmax_parab"
+    if centering not in ("argmax_parab", "centroid", "centroid_threshold"):
         raise ValueError(f"unknown centering={centering!r}")
 
     median = fill_nan_with_nanmedian(median_frame, kernel_size=10)
@@ -227,10 +240,12 @@ def find_trace(
                 delta = 0.5 * (y0 - y2) / denom
                 if -1 <= delta <= 1:
                     trace_y[i] = k + delta
-    else:
-        # Pass 2b: flux-weighted centroid in a ±centroid_half-row window
+    elif centering == "centroid":
+        # Pass 2b: flux-weighted centroid in a fixed ±centroid_half-row window
         # around the argmax seed.  Pulls toward the PSF center of mass even
-        # when the brightest pixel is on one side of an asymmetric profile.
+        # when the brightest pixel is on one side of an asymmetric profile —
+        # but only if the window is wide enough to reach both lobes (see
+        # "centroid_threshold" for the asymmetry-robust version).
         for i in range(n_cols):
             k = trace_argmax[i]
             if not np.isfinite(k):
@@ -243,6 +258,37 @@ def find_trace(
             if tot > 0 and np.isfinite(tot):
                 rows = np.arange(lo, hi, dtype=float)
                 trace_y[i] = float(np.nansum(rows * col) / tot)
+            else:
+                trace_y[i] = np.nan
+    else:
+        # Pass 2c: flux-weighted centroid over the *contiguous band* of rows
+        # whose smoothed flux exceeds `centroid_threshold_frac × peak`, grown
+        # outward from the argmax seed.  The band auto-sizes to the PSF: it
+        # bridges both GR700XD lobes (the inter-lobe dip stays above threshold)
+        # and stops at the background gap before order 2, so the centroid lands
+        # on the true flux middle of an asymmetric profile rather than the
+        # brighter lobe.  Flux weights come from the (negative-clipped) median.
+        for i in range(n_cols):
+            k = trace_argmax[i]
+            if not np.isfinite(k):
+                continue
+            ki = int(k)
+            peak = smoothed[ki, i]
+            if not (peak > 0):
+                trace_y[i] = np.nan
+                continue
+            thr = centroid_threshold_frac * peak
+            lo = ki
+            while lo - 1 >= 0 and smoothed[lo - 1, i] > thr:
+                lo -= 1
+            hi = ki
+            while hi + 1 < n_rows and smoothed[hi + 1, i] > thr:
+                hi += 1
+            rows = np.arange(lo, hi + 1, dtype=float)
+            w = np.maximum(median[lo:hi + 1, i], 0)   # clip negatives → no neg-mass
+            tot = np.nansum(w)
+            if tot > 0 and np.isfinite(tot):
+                trace_y[i] = float(np.nansum(rows * w) / tot)
             else:
                 trace_y[i] = np.nan
 
